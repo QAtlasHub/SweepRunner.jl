@@ -48,3 +48,15 @@ SweepRunner.RunOpts
 SweepRunner.run!
 SweepRunner.run_loop!
 ```
+
+## Preflight
+
+```@docs
+SweepRunner.Finding
+SweepRunner.PreflightReport
+SweepRunner.launchable
+SweepRunner.check_injective!
+SweepRunner.check_opens!
+SweepRunner.representative_keys
+SweepRunner.on_grid
+```
