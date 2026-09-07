@@ -1,4 +1,4 @@
-using ParallelManager, Test, DataVault, ParamIO
+using SweepRunner, Test, DataVault, ParamIO
 
 const FIXTURE_CFG_RL = joinpath(@__DIR__, "fixtures", "study.toml")
 

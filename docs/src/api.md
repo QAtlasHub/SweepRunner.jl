@@ -1,50 +1,50 @@
 # API reference
 
 ```@docs
-ParallelManager
+SweepRunner
 ```
 
 ## AtomicIO
 
 ```@docs
-ParallelManager.atomic_write
-ParallelManager.atomic_touch
+SweepRunner.atomic_write
+SweepRunner.atomic_touch
 ```
 
 ## EventLog
 
 ```@docs
-ParallelManager.EventLog
-ParallelManager.log_event
-ParallelManager.merge_event_logs
+SweepRunner.EventLog
+SweepRunner.log_event
+SweepRunner.merge_event_logs
 ```
 
 ## Manifest
 
 ```@docs
-ParallelManager.Manifest
-ParallelManager.manifest_path
-ParallelManager.load_manifest
-ParallelManager.save_manifest
-ParallelManager.add_complete!
-ParallelManager.is_complete
-ParallelManager.todo_keys
-ParallelManager.manifest_root
-ParallelManager.merge_and_save_manifest!
+SweepRunner.Manifest
+SweepRunner.manifest_path
+SweepRunner.load_manifest
+SweepRunner.save_manifest
+SweepRunner.add_complete!
+SweepRunner.is_complete
+SweepRunner.todo_keys
+SweepRunner.manifest_root
+SweepRunner.merge_and_save_manifest!
 ```
 
 ## InitWorkers
 
 ```@docs
-ParallelManager.init_workers!
-ParallelManager.detect_mode
-ParallelManager.verify_workers!
+SweepRunner.init_workers!
+SweepRunner.detect_mode
+SweepRunner.verify_workers!
 ```
 
 ## Run
 
 ```@docs
-ParallelManager.RunOpts
-ParallelManager.run!
-ParallelManager.run_loop!
+SweepRunner.RunOpts
+SweepRunner.run!
+SweepRunner.run_loop!
 ```

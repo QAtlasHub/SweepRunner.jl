@@ -16,7 +16,7 @@
  nothing to forget (the broadcast is where the classic
  `KeyError: <Module> not found` on a worker footgun lives).
 
- Run it (from the ParallelManager.jl package root, with the EXAMPLES env):
+ Run it (from the SweepRunner.jl package root, with the EXAMPLES env):
 
      julia --project=examples examples/scripts/compute.jl
      julia --project=examples examples/scripts/compute.jl examples/configs/logistic.toml
@@ -26,7 +26,7 @@
  sweep is O(1) to re-check regardless of how many keys it has.
 ==============================================================================#
 
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 using LogisticMap   # the work PACKAGE (defines the pure work_fn); shipped to workers via load=
 
 const EXAMPLES = abspath(joinpath(@__DIR__, ".."))
@@ -42,9 +42,9 @@ keys = ParamIO.expand(spec)          # Vector{DataKey}, one per (r × sample) = 
 #    anchor out/.datavault/logistic/phase1.log.toml and a config snapshot. ──
 vault = DataVault.Vault(CONFIG; run="phase1", outdir=OUTDIR)
 
-# ── Layer 3 · ParallelManager — bootstrap workers. mode=:auto picks
+# ── Layer 3 · SweepRunner — bootstrap workers. mode=:auto picks
 #    :sequential locally, :threads if -t>1, :slurm inside a SLURM job. ──
-ParallelManager.init_workers!(; mode=:auto)
+SweepRunner.init_workers!(; mode=:auto)
 
 #=  The work is LogisticMap.work_fn — a PURE (DataKey) -> Dict{String,Any}.
     Two things trip people (and LLMs) up, both handled by structure here:
@@ -55,7 +55,7 @@ ParallelManager.init_workers!(; mode=:auto)
 
     2. It must run on the WORKERS. Because the work lives in a package, we pass
        `load=LogisticMap` below and run! loads it (and ParamIO/DataVault/
-       ParallelManager) in Main on every worker before fan-out. Put your work in
+       SweepRunner) in Main on every worker before fan-out. Put your work in
        a package and this whole class of "module not defined on a worker" bugs
        disappears. =#
 
@@ -63,12 +63,12 @@ ParallelManager.init_workers!(; mode=:auto)
 # traps SIGUSR1 ~60 s before the wall-clock kill and `touch`es this file; run!
 # then stops dispatching new keys and returns cleanly. Unset locally ⇒ nothing.
 const STOP_FLAG = get(ENV, "PM_STOP_FLAG", nothing)
-opts = ParallelManager.RunOpts(; stop_flag=STOP_FLAG)
+opts = SweepRunner.RunOpts(; stop_flag=STOP_FLAG)
 
 # ── Run — manifest-aware early-skip, multi-master lock safety (DataVault .running), retry.
 #    `load=LogisticMap` ships the work module to the workers. Returns a NamedTuple
 #    of counters: (stage, done, err, skipped, total, …). ──
-result = ParallelManager.run!(LogisticMap.work_fn, vault, keys; opts=opts, load=LogisticMap)
+result = SweepRunner.run!(LogisticMap.work_fn, vault, keys; opts=opts, load=LogisticMap)
 @info "phase1 complete" result
 
 # Reader-side convenience: ledger.csv, one row per completed key.

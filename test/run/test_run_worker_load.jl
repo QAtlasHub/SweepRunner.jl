@@ -1,4 +1,4 @@
-using ParallelManager, Test, DataVault, ParamIO, Distributed
+using SweepRunner, Test, DataVault, ParamIO, Distributed
 
 # The behaviour this PR exists to deliver: under real Distributed workers, run! must load the seam
 # packages (+ the `load=` module) in Main on every worker before fan-out. The whole existing suite

@@ -51,7 +51,7 @@ Execution options for [`run!`](@ref).
 ```julia
 opts = RunOpts(max_attempts=5, stale_after=900.0, heartbeat_interval=30.0,
                stop_flag="/path/to/STOP_NOW_12345")
-ParallelManager.run!(work_fn, vault, keys; opts)
+SweepRunner.run!(work_fn, vault, keys; opts)
 ```
 """
 struct RunOpts
@@ -141,7 +141,7 @@ Run `work_fn(key) -> Dict` for every `key` in `keys`, persisting through
 so concurrent masters never contend on a single log.
 
 `load` names the module(s) the **worker** processes need beyond the always-loaded seam
-(`ParamIO`/`DataVault`/`ParallelManager`) — typically the package or module that defines `work_fn`
+(`ParamIO`/`DataVault`/`SweepRunner`) — typically the package or module that defines `work_fn`
 and the types it touches. Accepts a `Module`, `Symbol`, `String`, or a collection of them (e.g.
 `load=MyModel` or `load=[MyModel, Statistics]`). Under `:distributed`/`:slurm`, `run!` `using`s
 these in `Main` on every worker before fan-out, so a compute script no longer has to hand-roll the
@@ -213,7 +213,7 @@ function run!(
         # `KeyError: <Module> not found` (DataKey deserialization / the save! pipeline / work_fn).
         # Idempotent, so it composes with a project that still broadcasts modules by hand.
         _ensure_worker_modules(
-            vcat([:ParamIO, :DataVault, :ParallelManager], _worker_module_names(load))
+            vcat([:ParamIO, :DataVault, :SweepRunner], _worker_module_names(load))
         )
         _run_pmap!(work_fn, vault, todo, stage, log, opts)
     else

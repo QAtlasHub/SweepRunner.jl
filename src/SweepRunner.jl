@@ -1,5 +1,5 @@
 """
-    ParallelManager
+    SweepRunner
 
 HPC experiment runtime for Julia.
 
@@ -24,15 +24,15 @@ independently.
 # Quick start
 
 ```julia
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 
 spec  = ParamIO.load("config.toml")
 keys  = ParamIO.expand(spec)
 vault = DataVault.Vault("config.toml"; run="phase1")
 
-ParallelManager.init_workers!(mode=:auto)
+SweepRunner.init_workers!(mode=:auto)
 work_fn = key -> Dict{String,Any}("x" => compute(key))
-ParallelManager.run!(work_fn, vault, keys)
+SweepRunner.run!(work_fn, vault, keys)
 ```
 
 # Design constraints
@@ -58,7 +58,7 @@ ParallelManager.run!(work_fn, vault, keys)
   `DataVault.acquire_running!` — the storage + lock layer [`run!`](@ref)
   delegates to.
 """
-module ParallelManager
+module SweepRunner
 
 # Do NOT add a per-item `println` API anywhere in this module. Structured
 # events go through EventLog (JSONL) only. This is a structural answer to
@@ -70,4 +70,4 @@ include("Manifest.jl")
 include("InitWorkers.jl")
 include("Run.jl")
 
-end # module ParallelManager
+end # module SweepRunner

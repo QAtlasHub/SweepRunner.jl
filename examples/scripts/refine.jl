@@ -15,7 +15,7 @@
      julia --project=examples examples/scripts/refine.jl
 ==============================================================================#
 
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 
 const EXAMPLES = abspath(joinpath(@__DIR__, ".."))
 const CONFIG = get(ARGS, 1, joinpath(EXAMPLES, "configs", "logistic.toml"))
@@ -29,7 +29,7 @@ keys = ParamIO.expand(spec)
 phase1 = DataVault.Vault(CONFIG; run="phase1", outdir=OUTDIR)
 phase2 = DataVault.Vault(CONFIG; run="phase2", outdir=OUTDIR)
 
-ParallelManager.init_workers!(; mode=:auto)
+SweepRunner.init_workers!(; mode=:auto)
 
 # Classify each point's dynamical regime from phase1's Lyapunov exponent.
 function classify(key::DataKey)
@@ -39,5 +39,5 @@ function classify(key::DataKey)
     return Dict{String,Any}("r" => parent["r"], "lyapunov" => λ, "regime" => regime)
 end
 
-result = ParallelManager.run!(classify, phase2, keys)
+result = SweepRunner.run!(classify, phase2, keys)
 @info "phase2 complete" result

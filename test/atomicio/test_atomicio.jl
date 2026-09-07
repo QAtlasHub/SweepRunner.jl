@@ -1,4 +1,4 @@
-using ParallelManager, Test
+using SweepRunner, Test
 
 @testset "atomic_write: basic" begin
     mktempdir() do dir

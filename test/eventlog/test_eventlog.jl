@@ -1,4 +1,4 @@
-using ParallelManager, Test, JSON3
+using SweepRunner, Test, JSON3
 
 @testset "EventLog: single write" begin
     mktempdir() do dir
@@ -79,7 +79,7 @@ end
 
 @testset "EventLog: no println API exported" begin
     # Structural check: log_event is the only per-event API
-    names_exported = names(ParallelManager)
+    names_exported = names(SweepRunner)
     @test :log_event in names_exported
     # No public function named `println_event`, `print_event`, etc.
     for n in names_exported

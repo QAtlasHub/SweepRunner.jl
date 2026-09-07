@@ -20,13 +20,13 @@
 #SBATCH --signal=B:USR1@60       # send SIGUSR1 to the batch shell 60 s before the kill
 
 set -euo pipefail
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # ParallelManager.jl root
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # SweepRunner.jl root
 EXAMPLES_ENV="${PROJECT_DIR}/examples"                              # the examples env (its own Project.toml)
 CONFIG="${1:-${PROJECT_DIR}/examples/configs/logistic.toml}"
 COMPUTE="${PROJECT_DIR}/examples/scripts/compute.jl"
 JULIA_BIN="${JULIA_BIN:-julia}"
 
-# ── env vars that ParallelManager.init_workers!(mode=:slurm) reads ──
+# ── env vars that SweepRunner.init_workers!(mode=:slurm) reads ──
 export JULIA_SLURM_N_WORKERS=$(( SLURM_NTASKS - 1 ))   # master is one of the tasks
 export JULIA_WORKER_CPUS=${SLURM_CPUS_PER_TASK}        # per-worker BLAS threads
 export JULIA_WORKER_TIMEOUT=300                        # cold-NFS handshake window

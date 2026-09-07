@@ -1,4 +1,4 @@
-using ParallelManager, Test, DataVault, ParamIO
+using SweepRunner, Test, DataVault, ParamIO
 
 isdefined(@__MODULE__, :FIXTURE_CFG) ||
     (const FIXTURE_CFG = joinpath(@__DIR__, "fixtures", "study.toml"))
@@ -40,10 +40,10 @@ end
         v = DataVault.Vault(FIXTURE_CFG; run="phase1", outdir=outdir)
         key = ParamIO.expand(v.spec)[1]
         lost = Threads.Atomic{Bool}(true)        # simulate: heartbeat saw a reclaim
-        log = ParallelManager.EventLog(joinpath(outdir, "ev.jsonl"))
+        log = SweepRunner.EventLog(joinpath(outdir, "ev.jsonl"))
         ran = Ref(false)
         wf = k -> (ran[]=true; Dict{String,Any}("x" => 1))
-        outcome = ParallelManager._run_one_with_retry!(
+        outcome = SweepRunner._run_one_with_retry!(
             wf, v, key, ParamIO.canonical(key), :phase1, log, RunOpts(), lost
         )
         @test ran[]                              # work_fn ran...
@@ -71,8 +71,8 @@ end
             return Dict{String,Any}("x" => 1)
         end
         opts = RunOpts(; heartbeat_interval=0.001, stale_after=600.0)
-        log = ParallelManager.EventLog(joinpath(outdir, "ev.jsonl"))
-        (_, outcome) = ParallelManager._run_one_with_lock!(wf, v, key, :phase1, log, opts)
+        log = SweepRunner.EventLog(joinpath(outdir, "ev.jsonl"))
+        (_, outcome) = SweepRunner._run_one_with_lock!(wf, v, key, :phase1, log, opts)
         @test outcome === :lock_busy            # we detected the loss and bailed
         @test DataVault.is_running(v, key)      # the sibling's lock SURVIVES (not cleared)
         @test !DataVault.is_done(v, key)        # and we did not commit
@@ -82,7 +82,7 @@ end
 end
 
 @testset "error strings are truncated for the JSONL event log" begin
-    s = ParallelManager._short_err(ErrorException("x"^5000))
+    s = SweepRunner._short_err(ErrorException("x"^5000))
     @test length(s) <= 2100
     @test occursin("truncated", s)
 end

@@ -26,7 +26,7 @@
 # 4. PM no longer creates any `locks/` directory — confirming the
 #    "single source of truth for in-flight state" invariant on disk.
 
-using ParallelManager, Test, DataVault, ParamIO, Dates
+using SweepRunner, Test, DataVault, ParamIO, Dates
 
 const FIXTURE_CFG_K = joinpath(@__DIR__, "fixtures", "study.toml")
 
@@ -111,7 +111,7 @@ end
         end
 
         work_fn = k -> Dict{String,Any}("sample" => k.sample)
-        opts = ParallelManager.RunOpts(; stale_after=60.0, heartbeat_interval=5.0)
+        opts = SweepRunner.RunOpts(; stale_after=60.0, heartbeat_interval=5.0)
         result = run!(work_fn, v, keys; opts=opts)
 
         @test result.done == length(keys)
@@ -136,7 +136,7 @@ end
             return Dict{String,Any}("sample" => k.sample)
         end
 
-        opts = ParallelManager.RunOpts(; max_attempts=1)
+        opts = SweepRunner.RunOpts(; max_attempts=1)
         result = run!(work_fn, v, keys; opts=opts)
 
         # The failed key has no .done and no leftover .running.

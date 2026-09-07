@@ -10,7 +10,7 @@
 #    (exactly the situation the try-finally fix in #8 created a regression for)
 # ─────────────────────────────────────────────────────────────────────────────
 
-using ParallelManager, Test, DataVault, ParamIO, JSON3, JLD2
+using SweepRunner, Test, DataVault, ParamIO, JSON3, JLD2
 using Distributed
 using Dates
 

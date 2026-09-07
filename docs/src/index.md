@@ -1,11 +1,11 @@
-# ParallelManager.jl
+# SweepRunner.jl
 
 **HPC experiment runtime for Julia** — multi-master safe, crash-recoverable,
 `Pkg.test()`-fast.
 
 Wraps [ParamIO.jl](https://github.com/QAtlasHub/ParamIO.jl) and
 [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl) with a unified
-[`run!`](@ref ParallelManager.run!) that handles parallel dispatch,
+[`run!`](@ref SweepRunner.run!) that handles parallel dispatch,
 advisory locking, `.done` rollups, structured event logging, and retry.
 
 ## Pages
@@ -27,7 +27,7 @@ Depth = 2
 - **Structured events** — JSONL event log atomic across concurrent writers;
   per-item `println` is a non-goal, by design.
 - **One entry point for all parallel modes** —
-  [`init_workers!(mode=:auto)`](@ref ParallelManager.init_workers!)
+  [`init_workers!(mode=:auto)`](@ref SweepRunner.init_workers!)
   dispatches to `:sequential` / `:threads` / `:distributed` / `:slurm`
   depending on environment.
 - **Pure work functions** — your physics is a plain
@@ -36,15 +36,15 @@ Depth = 2
 ## 30-second tour
 
 ```julia
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 
 spec  = ParamIO.load("config.toml")
 keys  = ParamIO.expand(spec)
 vault = DataVault.Vault("config.toml"; run="phase1")
 
-ParallelManager.init_workers!(mode=:auto)
+SweepRunner.init_workers!(mode=:auto)
 work_fn = key -> Dict{String,Any}("x" => compute(key))
-ParallelManager.run!(work_fn, vault, keys)
+SweepRunner.run!(work_fn, vault, keys)
 ```
 
 Re-running the same script after completion emits `:skip_complete` and
@@ -54,12 +54,12 @@ exits in milliseconds regardless of `length(keys)`.
 
 | Pain | Answer |
 | :--- | :--- |
-| `.done` files rescanned every job (3600 files, ~10 min) | [`Manifest`](@ref ParallelManager.Manifest) rollup, one JLD2 read |
-| 300 MB of per-item `println` logs | [`EventLog`](@ref ParallelManager.EventLog) (JSONL); per-item `println` is not part of the API |
+| `.done` files rescanned every job (3600 files, ~10 min) | [`Manifest`](@ref SweepRunner.Manifest) rollup, one JLD2 read |
+| 300 MB of per-item `println` logs | [`EventLog`](@ref SweepRunner.EventLog) (JSONL); per-item `println` is not part of the API |
 | Killed samples silently wedge the queue | Heartbeat + stale-lock reclaim (DataVault `.running`) auto-recover |
 | Multiple masters double-execute the same key | Per-key `.running` advisory lock (`acquire_running!`) + post-lock `is_done` re-check |
-| Half-written JLD2 files after crash | [`atomic_write`](@ref ParallelManager.atomic_write) (tmp + fsync + rename) |
-| Every project reinvents SLURM / Distributed bootstrap | [`init_workers!`](@ref ParallelManager.init_workers!)`(mode=:auto)` |
+| Half-written JLD2 files after crash | [`atomic_write`](@ref SweepRunner.atomic_write) (tmp + fsync + rename) |
+| Every project reinvents SLURM / Distributed bootstrap | [`init_workers!`](@ref SweepRunner.init_workers!)`(mode=:auto)` |
 
 ## See also
 
