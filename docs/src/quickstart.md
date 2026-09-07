@@ -2,20 +2,20 @@
 
 ## Install
 
-ParallelManager depends on `ParamIO` and `DataVault`. Until they land in
+SweepRunner depends on `ParamIO` and `DataVault`. Until they land in
 the registry, pin them via `[sources]`:
 
 ```toml
 # your project's Project.toml
 [deps]
 DataVault       = "23f5f8f6-b4da-40ee-8c72-c53b6c5de94f"
-ParallelManager = "be946ad2-3cb3-4b6e-8f7e-4a5ecc3c255b"
+SweepRunner = "be946ad2-3cb3-4b6e-8f7e-4a5ecc3c255b"
 ParamIO         = "938a3ac2-d340-473c-bcf1-88af577e4ccf"
 
 [sources]
 ParamIO         = {url = "https://github.com/QAtlasHub/ParamIO.jl.git"}
 DataVault       = {url = "https://github.com/QAtlasHub/DataVault.jl.git"}
-ParallelManager = {url = "https://github.com/QAtlasHub/ParallelManager.jl.git"}
+SweepRunner = {url = "https://github.com/QAtlasHub/SweepRunner.jl.git"}
 ```
 
 Then:
@@ -45,13 +45,13 @@ J = [0.5, 1.0]
 And a script `run.jl`:
 
 ```julia
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 
 spec  = ParamIO.load("config.toml")
 keys  = ParamIO.expand(spec)
 vault = DataVault.Vault("config.toml"; run="phase1")
 
-ParallelManager.init_workers!(mode=:auto)
+SweepRunner.init_workers!(mode=:auto)
 
 work_fn = key -> Dict{String,Any}(
     "N" => key.params["N"],
@@ -59,7 +59,7 @@ work_fn = key -> Dict{String,Any}(
     "energy" => key.params["N"] * key.params["J"],
 )
 
-result = ParallelManager.run!(work_fn, vault, keys)
+result = SweepRunner.run!(work_fn, vault, keys)
 @info "stage complete" result
 ```
 
@@ -87,7 +87,7 @@ work_fn = key -> begin
     return Dict{String,Any}("energy_squared" => energy)
 end
 
-ParallelManager.run!(work_fn, phase2_vault, keys)
+SweepRunner.run!(work_fn, phase2_vault, keys)
 ```
 
 This is the canonical replacement for `p2_phase1_mps_path`-style string
@@ -127,7 +127,7 @@ Use `templateHPC.jl`'s `batch/issp-example.sh` as the baseline. The Julia
 side looks like:
 
 ```julia
-ParallelManager.init_workers!(mode=:auto)   # detects SLURM_JOB_ID
+SweepRunner.init_workers!(mode=:auto)   # detects SLURM_JOB_ID
 ```
 
 and the bash side:
@@ -145,4 +145,4 @@ taskset -c 0 julia --project run.jl
 
 `taskset -c 0` pins the master so `SlurmClusterManager`'s internal `srun`
 can spawn workers across nodes without nested-job-step errors.
-[`init_workers!`](@ref ParallelManager.init_workers!) handles the rest.
+[`init_workers!`](@ref SweepRunner.init_workers!) handles the rest.

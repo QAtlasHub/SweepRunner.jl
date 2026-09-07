@@ -1,4 +1,4 @@
-using ParallelManager, Test
+using SweepRunner, Test
 using LinearAlgebra
 
 @testset "detect_mode: no SLURM" begin
@@ -84,7 +84,7 @@ end
 end
 
 @testset "_worker_module_names / _modname normalization" begin
-    wmn = ParallelManager._worker_module_names
+    wmn = SweepRunner._worker_module_names
     @test wmn(nothing) == Symbol[]
     @test wmn(:Statistics) == [:Statistics]
     @test wmn("Statistics") == [:Statistics]

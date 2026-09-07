@@ -1,4 +1,4 @@
-using ParallelManager
+using SweepRunner
 using Documenter
 using Downloads
 
@@ -11,9 +11,9 @@ Downloads.download("https://github.com/sotashimozono.png", favicon_path)
 Downloads.download("https://github.com/sotashimozono.png", logo_path)
 
 makedocs(;
-    sitename="ParallelManager.jl",
+    sitename="SweepRunner.jl",
     format=Documenter.HTML(;
-        canonical="https://qatlashub.github.io/ParallelManager.jl/dev/",
+        canonical="https://qatlashub.github.io/SweepRunner.jl/stable/",
         prettyurls=get(ENV, "CI", "false") == "true",
         mathengine=MathJax3(
             Dict(
@@ -26,7 +26,7 @@ makedocs(;
         ),
         assets=["assets/favicon.ico", "assets/custom.css"],
     ),
-    modules=[ParallelManager],
+    modules=[SweepRunner],
     checkdocs=:exports,
     pages=[
         "Home" => "index.md",
@@ -38,5 +38,5 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/QAtlasHub/ParallelManager.jl.git", devbranch="main", push_preview=true
+    repo="github.com/QAtlasHub/SweepRunner.jl.git", devbranch="main", push_preview=true
 )

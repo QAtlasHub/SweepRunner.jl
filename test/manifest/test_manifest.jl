@@ -1,4 +1,4 @@
-using ParallelManager, Test, ParamIO
+using SweepRunner, Test, ParamIO
 
 mkkey(params; sample=0) = DataKey(Dict{String,Any}(params...), sample)
 
@@ -65,7 +65,7 @@ end
 
 @testset "Manifest: monotonic (no remove API)" begin
     # Structural check: there is no `remove_complete!` exported
-    names_exported = names(ParallelManager)
+    names_exported = names(SweepRunner)
     @test !(:remove_complete! in names_exported)
     @test !(:delete_complete! in names_exported)
 end

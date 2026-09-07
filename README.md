@@ -1,23 +1,28 @@
-# ParallelManager.jl
+# SweepRunner.jl
 
-[![docs: dev](https://img.shields.io/badge/docs-dev-purple.svg)](https://qatlashub.github.io/ParallelManager.jl/dev/)
+[![docs: dev](https://img.shields.io/badge/docs-dev-purple.svg)](https://qatlashub.github.io/SweepRunner.jl/dev/)
 [![Julia](https://img.shields.io/badge/julia-v1.11+-9558b2.svg)](https://julialang.org)
 [![Code Style: Blue](https://img.shields.io/badge/Code%20Style-Blue-4495d1.svg)](https://github.com/invenia/BlueStyle)
 
-[![codecov](https://codecov.io/gh/QAtlasHub/ParallelManager.jl/graph/badge.svg?token=0kGBejbpL8)](https://codecov.io/gh/QAtlasHub/ParallelManager.jl)
-[![Build Status](https://github.com/QAtlasHub/ParallelManager.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/QAtlasHub/ParallelManager.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![codecov](https://codecov.io/gh/QAtlasHub/SweepRunner.jl/graph/badge.svg?token=0kGBejbpL8)](https://codecov.io/gh/QAtlasHub/SweepRunner.jl)
+[![Build Status](https://github.com/QAtlasHub/SweepRunner.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/QAtlasHub/SweepRunner.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**HPC experiment runtime for Julia** — multi-master safe, crash-recoverable,
-`Pkg.test()`-fast. Wraps [ParamIO.jl](https://github.com/QAtlasHub/ParamIO.jl)
-and [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl) with a
-unified `run!` that handles parallel dispatch, advisory locking, `.done`
-rollups, structured event logging, and retry.
+Running a parameter sweep on a cluster is mostly bookkeeping. The physics is a
+function of one parameter point; everything around it is not. Working out which
+points are still missing, dispatching them to SLURM or `Distributed` or threads,
+writing each result without corrupting it, and continuing after the scheduler
+kills the job — that layer gets rewritten once per project and is never quite
+right.
 
-Designed to replace the recurring "glue" layer that every HPC research
-project re-invents: the script that loops over parameter points, decides
-which ones still need work, runs them on SLURM / Distributed / threads,
-survives kills, and logs what happened.
+SweepRunner is that layer, factored out. `run!` takes a store, a list of
+parameter keys, and a function that computes one key. It skips the keys that are
+already finished, runs the rest, and records what happened. Two `julia`
+processes can point at the same store without computing the same key twice, and
+a run that is killed is continued by the next one rather than left half-done.
+
+The parameter keys come from [ParamIO.jl](https://github.com/QAtlasHub/ParamIO.jl)
+and the store from [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl).
 
 ## Highlights
 
@@ -42,7 +47,7 @@ survives kills, and logs what happened.
 ## Quick start
 
 ```julia
-using ParamIO, DataVault, ParallelManager
+using ParamIO, DataVault, SweepRunner
 
 # 1. Load the parameter sweep
 spec  = ParamIO.load("config.toml")
@@ -50,13 +55,13 @@ keys  = ParamIO.expand(spec)
 vault = DataVault.Vault("config.toml"; run="phase1")
 
 # 2. Bootstrap workers (auto-detects SLURM / threads / sequential)
-ParallelManager.init_workers!(mode=:auto)
+SweepRunner.init_workers!(mode=:auto)
 
 # 3. Describe the work as a pure function
 work_fn = key -> Dict{String,Any}("spectrum" => my_dmrg(key.params["N"]))
 
 # 4. Run — manifest-aware, lock-safe, crash-recoverable
-ParallelManager.run!(work_fn, vault, keys)
+SweepRunner.run!(work_fn, vault, keys)
 ```
 
 Re-running the same script after completion: `:skip_complete` is logged and
@@ -77,7 +82,7 @@ work_fn = key -> begin
     return Dict{String,Any}("energy" => measure_thermal(mps))
 end
 
-ParallelManager.run!(work_fn, phase2_vault, keys)
+SweepRunner.run!(work_fn, phase2_vault, keys)
 ```
 
 This is the canonical replacement for the `p2_phase1_mps_path`-style string
@@ -113,7 +118,7 @@ Built from direct experience with the old-style HPC loop pattern used in
 ## Installation
 
 ```julia
-pkg> add ParallelManager
+pkg> add SweepRunner
 ```
 
 Its dependencies `ParamIO.jl` and `DataVault.jl` are in the General registry too, so nothing
@@ -129,7 +134,7 @@ Requires Julia v1.11+.
 - `eventlog/` — JSON roundtrip, 50-task × 40-event concurrent write
 - `manifest/` — save/load, `todo_keys`, 3600-key bench, corrupted file
 - `init_workers/` — `:auto`, `:sequential`, `:threads`, `:slurm` env reading
-- `run/` — minimal, manifest early-skip, 4-master keylock race, retry, gave_up
+- `run/` — minimal, manifest early-skip, 8-master race under a fast heartbeat, retry, gave_up
 
 ## See also
 

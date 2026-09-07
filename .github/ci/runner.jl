@@ -26,7 +26,7 @@ ENV["PM_TEST_N_MASTERS"] = string(n_masters)
 # Launch Distributed workers when mode == "distributed"
 using Distributed  # always load; needed for nprocs() etc. in tests
 
-# `preload_workers` controls whether we do `@everywhere using ParallelManager`.
+# `preload_workers` controls whether we do `@everywhere using SweepRunner`.
 # Production Slurm setups on ISSP load the package only on the master, which
 # previously masked a bug in verify_workers! (PkgId not found on workers).
 # Keep at least one env that tests the master-only scenario.
@@ -36,7 +36,7 @@ if mode == "distributed" && n_workers > 0
     project = dirname(Base.active_project())
     addprocs(n_workers; exeflags="--project=$project")
     if preload_workers
-        @everywhere using ParallelManager, DataVault, ParamIO
+        @everywhere using SweepRunner, DataVault, ParamIO
         println("  Workers launched (with PM preloaded): $(workers())")
     else
         println("  Workers launched (MASTER-ONLY: PM not loaded on workers): $(workers())")
@@ -44,12 +44,12 @@ if mode == "distributed" && n_workers > 0
 end
 
 # Load the package (must come after addprocs so @everywhere sees it)
-using ParallelManager
+using SweepRunner
 
 # Run test files from the specified directories
-@testset "ParallelManager ($mode, m=$(n_masters), w=$(n_workers))" begin
+@testset "SweepRunner ($mode, m=$(n_masters), w=$(n_workers))" begin
     for dir in test_dirs
-        dirpath = joinpath(pkgdir(ParallelManager), "test", dir)
+        dirpath = joinpath(pkgdir(SweepRunner), "test", dir)
         if !isdir(dirpath)
             @warn "Test directory not found: $dirpath"
             continue

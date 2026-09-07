@@ -1,4 +1,4 @@
-# Examples — the ParamIO → DataVault → ParallelManager stack, end to end
+# Examples — the ParamIO → DataVault → SweepRunner stack, end to end
 
 A complete, **runnable, dependency-free** parameter sweep that uses all three
 infra packages the way a real HPC job does. The "physics" is the logistic map
@@ -16,7 +16,7 @@ read this directory.
 | --- | --- | --- | --- |
 | 1 | **ParamIO** | config TOML → `Vector{DataKey}` (*what* to compute) | `configs/logistic.toml` → 18 keys |
 | 2 | **DataVault** | `(study, run)` → storage, `.done`, ledger (*where* it goes) | `out/data/logistic/phase1/…` |
-| 3 | **ParallelManager** | `run!(work_fn, vault, keys)` → the runtime (*do it*, lock-safe, resumable) | `scripts/compute.jl` |
+| 3 | **SweepRunner** | `run!(work_fn, vault, keys)` → the runtime (*do it*, lock-safe, resumable) | `scripts/compute.jl` |
 
 ## Files
 
@@ -36,7 +36,7 @@ examples/
 
 ## Run it
 
-From the **ParallelManager.jl package root**, using the **examples env**
+From the **SweepRunner.jl package root**, using the **examples env**
 (`examples/Project.toml`, which pulls the three infra packages + the `LogisticMap`
 work package — `--project=examples`):
 
@@ -119,7 +119,7 @@ out/
 6. **Your work reaches the workers because it's a package + `load=`.**
    `init_workers!` spawns workers with `--project` but loads no packages. Put the
    work in a package (here `LogisticMap`) and pass `run!(…; load=LogisticMap)`:
-   the runtime `using`s it — plus `ParamIO`/`DataVault`/`ParallelManager` — in
+   the runtime `using`s it — plus `ParamIO`/`DataVault`/`SweepRunner` — in
    `Main` on every worker before fan-out. No `@everywhere`, no hand-rolled
    `remotecall` broadcast, nothing to forget. The failure that used to read
    `KeyError: <Module> not found` on a worker (only ever on a real cluster) is

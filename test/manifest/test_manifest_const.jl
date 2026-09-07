@@ -1,4 +1,4 @@
-using ParallelManager, Test, ParamIO
+using SweepRunner, Test, ParamIO
 
 # A ParamIO `{const = X}` param yields a DataKey whose value is a *vector* (one fixed value), not a
 # swept scalar. The Manifest keys on `ParamIO.canonical`, so it must (a) distinguish such keys by

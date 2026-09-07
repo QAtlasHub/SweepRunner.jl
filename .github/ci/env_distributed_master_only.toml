@@ -1,7 +1,7 @@
 # Env 6: ISSP Slurm-like — workers are added via addprocs, but the user package
 # is loaded ONLY on the master. This mirrors the real production setup where
 # `init_workers!(mode=:slurm)` spawns worker Julia processes without first
-# doing `@everywhere using ParallelManager`. Exercises the verify_workers!
+# doing `@everywhere using SweepRunner`. Exercises the verify_workers!
 # and pmap code paths that must not capture closures inside the package's
 # module scope.
 [env]

@@ -1,6 +1,6 @@
 # Architecture
 
-ParallelManager is a small set of files — each one concern, each one
+SweepRunner is a small set of files — each one concern, each one
 module-scope piece. This page explains how they fit together and why.
 
 ## Layers
@@ -9,7 +9,7 @@ module-scope piece. This page explains how they fit together and why.
 ┌─────────────────────────────────────────────────┐
 │  your project (templateHPC or similar)          │
 ├─────────────────────────────────────────────────┤
-│  ParallelManager (this package)                 │
+│  SweepRunner (this package)                 │
 │  init_workers! / run! / Manifest /              │
 │  EventLog / AtomicIO                            │
 ├─────────────────────┬───────────────────────────┤
@@ -20,8 +20,8 @@ module-scope piece. This page explains how they fit together and why.
 └─────────────────────┴───────────────────────────┘
 ```
 
-Dependencies flow **downward only**. ParallelManager knows about
-DataVault and ParamIO; neither of them know about ParallelManager.
+Dependencies flow **downward only**. SweepRunner knows about
+DataVault and ParamIO; neither of them know about SweepRunner.
 
 ## Why a separate layer?
 
@@ -46,12 +46,12 @@ and owns the coordination story separately.
 
 | File                                                | Responsibility                                                                                       |
 | :-------------------------------------------------- | :--------------------------------------------------------------------------------------------------- |
-| [`src/AtomicIO.jl`](https://github.com/QAtlasHub/ParallelManager.jl/blob/main/src/AtomicIO.jl)   | `atomic_write` / `atomic_touch` — tmp + fsync + POSIX rename, NFS-safe                               |
-| [`src/EventLog.jl`](https://github.com/QAtlasHub/ParallelManager.jl/blob/main/src/EventLog.jl)   | JSONL structured log; single-write atomic lines for multi-process append safety                     |
-| [`src/Manifest.jl`](https://github.com/QAtlasHub/ParallelManager.jl/blob/main/src/Manifest.jl)   | Stage-level rollup of `canonical(key)` strings for O(1) early-skip                                   |
+| [`src/AtomicIO.jl`](https://github.com/QAtlasHub/SweepRunner.jl/blob/main/src/AtomicIO.jl)   | `atomic_write` / `atomic_touch` — tmp + fsync + POSIX rename, NFS-safe                               |
+| [`src/EventLog.jl`](https://github.com/QAtlasHub/SweepRunner.jl/blob/main/src/EventLog.jl)   | JSONL structured log; single-write atomic lines for multi-process append safety                     |
+| [`src/Manifest.jl`](https://github.com/QAtlasHub/SweepRunner.jl/blob/main/src/Manifest.jl)   | Stage-level rollup of `canonical(key)` strings for O(1) early-skip                                   |
 | _(per-key lock)_                                    | moved to DataVault's `.running` (`acquire_running!`, POSIX `link()`) as of v0.3; `Run.jl` calls into it                |
-| [`src/InitWorkers.jl`](https://github.com/QAtlasHub/ParallelManager.jl/blob/main/src/InitWorkers.jl) | Unified `:auto` / `:sequential` / `:threads` / `:distributed` / `:slurm` bootstrap                   |
-| [`src/Run.jl`](https://github.com/QAtlasHub/ParallelManager.jl/blob/main/src/Run.jl)             | [`run!(work_fn, vault, keys; opts)`](@ref ParallelManager.run!) facade                               |
+| [`src/InitWorkers.jl`](https://github.com/QAtlasHub/SweepRunner.jl/blob/main/src/InitWorkers.jl) | Unified `:auto` / `:sequential` / `:threads` / `:distributed` / `:slurm` bootstrap                   |
+| [`src/Run.jl`](https://github.com/QAtlasHub/SweepRunner.jl/blob/main/src/Run.jl)             | [`run!(work_fn, vault, keys; opts)`](@ref SweepRunner.run!) facade                               |
 
 ## Key identity: `canonical(::DataKey)`
 
@@ -65,9 +65,9 @@ filesystem encodings.
 
 When you call `run!(work_fn, vault, keys)`, it does:
 
-1. Open an [`EventLog`](@ref ParallelManager.EventLog) at
+1. Open an [`EventLog`](@ref SweepRunner.EventLog) at
    `joinpath(vault.outdir, "events.jsonl")`.
-2. Load the stage [`Manifest`](@ref ParallelManager.Manifest) and compute
+2. Load the stage [`Manifest`](@ref SweepRunner.Manifest) and compute
    `todo = todo_keys(manifest, keys)`. If empty, emit `:skip_complete`
    and return.
 3. Emit `:stage_start`.
@@ -120,9 +120,9 @@ via `EventLog` collapses that to ~2 events per key plus a handful of
 per-stage events, each a structured JSON line, totaling well under 1 MB
 for typical jobs.
 
-ParallelManager's public API **does not include a per-item `println`**.
-Adding one is considered a regression. Use [`log_event`](@ref ParallelManager.log_event)
-with one of the standard event kinds documented on [`EventLog`](@ref ParallelManager.EventLog).
+SweepRunner's public API **does not include a per-item `println`**.
+Adding one is considered a regression. Use [`log_event`](@ref SweepRunner.log_event)
+with one of the standard event kinds documented on [`EventLog`](@ref SweepRunner.EventLog).
 
 ## Why no Stage / DAG
 
@@ -135,4 +135,4 @@ adds learning cost without paying for itself at the current scale.
 
 If a pattern emerges across multiple projects for stage composition,
 the right layer to build it on is `DataVault.load(parent_vault, key)`
-in a thin helper — not a new abstract type in ParallelManager.
+in a thin helper — not a new abstract type in SweepRunner.

@@ -1,10 +1,10 @@
-# Example config for the ParamIO → DataVault → ParallelManager stack.
+# Example config for the ParamIO → DataVault → SweepRunner stack.
 #
 # This single file is consumed by all three layers:
 #   ParamIO.load(this)   → ConfigSpec   (reads [study], [datavault], [[paramsets]])
 #   DataVault.Vault(this) → Vault        (reads [study] for project_name/outdir,
 #                                         [datavault] path_keys for directory names)
-#   ParallelManager.run! → uses the DataKeys ParamIO expands from it.
+#   SweepRunner.run! → uses the DataKeys ParamIO expands from it.
 
 [study]
 project_name  = "logistic"   # = the DataVault "study" name; top dir under data/

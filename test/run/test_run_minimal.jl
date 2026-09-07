@@ -1,4 +1,4 @@
-using ParallelManager, Test, DataVault, ParamIO, JSON3
+using SweepRunner, Test, DataVault, ParamIO, JSON3
 
 const FIXTURE_CFG = joinpath(@__DIR__, "fixtures", "study.toml")
 
@@ -91,7 +91,7 @@ end
 
 @testset "run! minimal: no per-key println noise" begin
     # Structural: there must be no println call in Run.jl per-key path.
-    src = read(joinpath(pkgdir(ParallelManager), "src", "Run.jl"), String)
+    src = read(joinpath(pkgdir(SweepRunner), "src", "Run.jl"), String)
     # Strip comments/docstrings to count real println calls
     code_only = replace(src, r"#[^\n]*" => "")
     @test !occursin("println(", code_only)

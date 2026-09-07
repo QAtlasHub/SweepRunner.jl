@@ -171,7 +171,7 @@ end
 function _log_init(mode::String, n_workers::Int, master_blas::Int, worker_blas::Int)
     # Note: this is init-time informational output, not per-item. OK to use
     # println here (single line, once per run).
-    println("=== ParallelManager.init_workers! ($mode) ===")
+    println("=== SweepRunner.init_workers! ($mode) ===")
     println("  workers     : $n_workers")
     println("  master BLAS : $master_blas")
     println("  worker BLAS : $worker_blas")
@@ -194,8 +194,8 @@ function verify_workers!()
     nprocs() > 1 || return nothing
     println("\n--- Worker verification ---")
     # The probe closure MUST be evaluated in the worker's Main module —
-    # otherwise it gets serialized under ParallelManager's scope and
-    # deserialization fails on workers that haven't loaded ParallelManager
+    # otherwise it gets serialized under SweepRunner's scope and
+    # deserialization fails on workers that haven't loaded SweepRunner
     # (a common setup when compute.jl loads the package only on the master
     # before calling init_workers!).
     futures = [
@@ -244,7 +244,7 @@ function verify_workers!()
     return nothing
 end
 
-# Load `modnames` (e.g. [:ParamIO, :DataVault, :ParallelManager, :MyWork]) into `Main` on EVERY
+# Load `modnames` (e.g. [:ParamIO, :DataVault, :SweepRunner, :MyWork]) into `Main` on EVERY
 # worker, so a pmap'd task — `DataKey` deserialization, `run!`'s `acquire_running!`/`save!`/
 # `mark_done!` pipeline, and the user's `work_fn` — can resolve them. `init_workers!` spawns the
 # workers with `--project` but does NOT load the project's packages; without this a real
@@ -252,7 +252,7 @@ end
 # real Slurm, never on the master, because the master loaded the packages before `addprocs`).
 #
 # Uses `remotecall(Core.eval, …, quoted-using-expr)` — DATA, not a module-scoped closure — so it
-# works even on a worker that has not yet loaded ParallelManager (the same reason `verify_workers!`
+# works even on a worker that has not yet loaded SweepRunner (the same reason `verify_workers!`
 # evaluates its probe in the worker's `Main`). Idempotent: re-`using` an already-loaded module is a
 # no-op, so this composes with a project that still broadcasts modules by hand.
 function _ensure_worker_modules(modnames)
@@ -269,9 +269,9 @@ function _ensure_worker_modules(modnames)
         # the usual cause is a worker whose `--project` is missing a package, which is exactly
         # the failure this function exists to make legible.
         error(
-            "ParallelManager: failed to load $(names) on a worker — check the worker's " *
+            "SweepRunner: failed to load $(names) on a worker — check the worker's " *
             "--project provides every package named by `run!(…; load=…)` plus the seam " *
-            "packages (ParamIO/DataVault/ParallelManager).\nUnderlying error:\n" *
+            "packages (ParamIO/DataVault/SweepRunner).\nUnderlying error:\n" *
             sprint(showerror, e),
         )
     end

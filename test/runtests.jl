@@ -1,6 +1,6 @@
 ENV["GKSwstype"] = "100"
 
-using ParallelManager, Test
+using SweepRunner, Test
 using TestShards
 
 # Every `test_*.jl` under `test/`, in a deterministic order, each one its own shardable unit.

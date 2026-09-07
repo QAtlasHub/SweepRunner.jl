@@ -51,7 +51,7 @@ regardless of which master happened to win each race.
 If a master is `kill -9`'d (or its node reboots) mid-stage:
 
 1. Its lock directories remain on disk with stale `heartbeat` mtimes.
-2. Half-written payload files do not exist — [`atomic_write`](@ref ParallelManager.atomic_write)
+2. Half-written payload files do not exist — [`atomic_write`](@ref SweepRunner.atomic_write)
    renames only after `fsync`, so readers see either the previous version
    or the new one.
 3. Start a new master with the same `run.jl`. After `opts.stale_after`
@@ -61,7 +61,7 @@ If a master is `kill -9`'d (or its node reboots) mid-stage:
 For tests, tighten the window:
 
 ```julia
-ParallelManager.run!(work_fn, vault, keys;
+SweepRunner.run!(work_fn, vault, keys;
                      opts=RunOpts(stale_after=1.0, heartbeat_interval=0.2))
 ```
 
@@ -102,7 +102,7 @@ Because `work_fn` is pure, you can `@enter work_fn(keys[1])` or
 ## 6. Custom retry policy
 
 ```julia
-ParallelManager.run!(work_fn, vault, keys;
+SweepRunner.run!(work_fn, vault, keys;
                      opts=RunOpts(
                          max_attempts=5,
                          stale_after=1800.0,          # 30 min
@@ -119,8 +119,8 @@ picks it up.
 On a workstation or laptop:
 
 ```julia
-ParallelManager.init_workers!(mode=:sequential, verbose=false)
-ParallelManager.run!(work_fn, vault, keys)
+SweepRunner.init_workers!(mode=:sequential, verbose=false)
+SweepRunner.run!(work_fn, vault, keys)
 ```
 
 or with multi-threading:
@@ -135,7 +135,7 @@ julia --project --threads=8 run.jl
 ## 8. Cleaning a corrupted manifest
 
 A corrupted `manifest.jld2` is treated as empty by
-[`load_manifest`](@ref ParallelManager.load_manifest), so the worst case
+[`load_manifest`](@ref SweepRunner.load_manifest), so the worst case
 is a full re-run (made safe by per-key locks + `is_done` re-check). If
 you want to force that:
 

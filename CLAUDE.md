@@ -1,7 +1,7 @@
-# CLAUDE.md — ParallelManager.jl
+# CLAUDE.md — SweepRunner.jl
 
 **Layer 3 (top) of the infra HPC stack** (ParamIO → DataVault →
-ParallelManager): `run!(work_fn, vault, keys)` is the runtime that ties layers 1
+SweepRunner): `run!(work_fn, vault, keys)` is the runtime that ties layers 1
 and 2 together with parallel dispatch, advisory locking, manifest early-skip,
 structured event logging, retry, and crash recovery. See [`../CLAUDE.md`](../CLAUDE.md)
 for how the three layers fit together.
@@ -24,7 +24,7 @@ for how the three layers fit together.
 - Read params by the **DOTTED** key: `key.params["system.N"]`.
 - Depend only on `key` (broadcast shared config with `@everywhere const`),
   or the function breaks under `:distributed`.
-- **Worker module loading is automatic.** `run!` `using`s `ParamIO`/`DataVault`/`ParallelManager`
+- **Worker module loading is automatic.** `run!` `using`s `ParamIO`/`DataVault`/`SweepRunner`
   in `Main` on every worker before fan-out, so a sweep no longer dies with a cryptic
   `KeyError: <Module> not found` on the first pmap task (a failure only ever seen on real Slurm).
   Name any *additional* installed module your `work_fn` needs — its own package, or a stdlib like
