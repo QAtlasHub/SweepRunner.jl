@@ -141,6 +141,7 @@ Requires Julia v1.11+.
 
 - [ParamIO.jl](https://github.com/QAtlasHub/ParamIO.jl) — config TOML parsing and `DataKey` enumeration
 - [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl) — `Vault` struct, atomic JLD2 save, `.done` markers
+- [templateHPC.jl](https://github.com/QAtlasHub/templateHPC.jl) — clone-to-start scaffold wiring all three together
 
 ## License
 
