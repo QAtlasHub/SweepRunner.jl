@@ -39,12 +39,20 @@ Execution options for [`run!`](@ref).
   totals still ride in the `:stage_done` summary), keeping the JSONL log
   O(computed keys) instead of O(masters × keys) under multi-master contention.
   Set `:debug` to log them (e.g. to debug lock contention).
-- `stop_flag::Union{String,Nothing} = nothing` — path to a sentinel file.
-  When `isfile(stop_flag)` becomes true, [`run!`](@ref) and
-  [`run_loop!`](@ref) stop dispatching new keys and return early. This is
-  the infra equivalent of FiniteTemperature.jl's `STOP_NOW_\$JOB_ID`
-  mechanism, typically created by a SIGUSR1 signal handler in the batch
-  script 60 s before Slurm kills the job.
+- `stop_flag::Union{String,Nothing}` — path to a sentinel file. When
+  `isfile(stop_flag)` becomes true, [`run!`](@ref) and [`run_loop!`](@ref)
+  stop dispatching new keys and return early. This is the infra equivalent
+  of FiniteTemperature.jl's `STOP_NOW_\$JOB_ID` mechanism, typically created
+  by a SIGUSR1 signal handler in the batch script 60 s before Slurm kills
+  the job.
+
+  **Defaults to `ENV["SWEEPRUNNER_STOP_FLAG"]`**, because the batch script
+  that traps the signal and the driver that passes the option are different
+  files, and the only thing they can agree on without one importing the
+  other is the environment. Leaving the name to the caller meant every
+  driver had to remember a variable this package never mentions; a driver
+  that misspells it gets no error and no graceful stop, only a killed job.
+  Pass `stop_flag=nothing` explicitly to opt out.
 
 # Example
 
@@ -68,7 +76,7 @@ function RunOpts(;
     max_attempts::Int=3,
     stale_after::Real=600.0,
     heartbeat_interval::Real=60.0,
-    stop_flag::Union{String,Nothing}=nothing,
+    stop_flag::Union{String,Nothing}=get(ENV, "SWEEPRUNNER_STOP_FLAG", nothing),
     log_level::Symbol=:info,
 )
     workers in (:auto, :sequential) || throw(

@@ -41,8 +41,8 @@ export DATAVAULT_OUTDIR="${DATAVAULT_OUTDIR:-${PROJECT_DIR}/examples/out}"
 
 # ── graceful stop: trap SIGUSR1 → touch the sentinel compute.jl watches via
 #    RunOpts(stop_flag=…). run!/run_loop! finish the in-flight key and exit. ──
-export PM_STOP_FLAG="${DATAVAULT_OUTDIR}/STOP_NOW_${SLURM_JOB_ID}"
-trap 'touch "${PM_STOP_FLAG}"' USR1
+export SWEEPRUNNER_STOP_FLAG="${DATAVAULT_OUTDIR}/STOP_NOW_${SLURM_JOB_ID}"
+trap 'touch "${SWEEPRUNNER_STOP_FLAG}"' USR1
 
 # Pin the master to core 0 so SlurmClusterManager's internal srun can launch
 # the workers across the allocation without nested-job-step contention.

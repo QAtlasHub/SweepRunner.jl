@@ -62,8 +62,9 @@ SweepRunner.init_workers!(; mode=:auto)
 # Optional graceful-stop sentinel: the SLURM template (batch/submit_slurm.sh)
 # traps SIGUSR1 ~60 s before the wall-clock kill and `touch`es this file; run!
 # then stops dispatching new keys and returns cleanly. Unset locally ⇒ nothing.
-const STOP_FLAG = get(ENV, "PM_STOP_FLAG", nothing)
-opts = SweepRunner.RunOpts(; stop_flag=STOP_FLAG)
+# `RunOpts` reads SWEEPRUNNER_STOP_FLAG itself, so the driver does not repeat the name that
+# batch/submit_slurm.sh exports. Unset locally, in which case nothing is watched.
+opts = SweepRunner.RunOpts()
 
 # ── Run — manifest-aware early-skip, multi-master lock safety (DataVault .running), retry.
 #    `load=LogisticMap` ships the work module to the workers. Returns a NamedTuple
