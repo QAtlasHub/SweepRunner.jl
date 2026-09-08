@@ -8,6 +8,21 @@ test_double_run_safety.jl — RunOpts invariant enforcement, the `workers`
 field wiring, and the lost-lock abort that prevents a double-commit.
 """
 
+@testset "RunOpts: stop_flag defaults to the environment" begin
+    # The batch script that traps the signal and the driver that constructs RunOpts are different
+    # files; the environment is the only thing they share. Asserted in both directions, because a
+    # default that reads the environment is only meaningful if it is also absent when unset — and
+    # the explicit `nothing` has to keep winning, or opting out becomes impossible.
+    withenv("SWEEPRUNNER_STOP_FLAG" => nothing) do
+        @test RunOpts().stop_flag === nothing
+    end
+    withenv("SWEEPRUNNER_STOP_FLAG" => "/tmp/STOP_NOW_42") do
+        @test RunOpts().stop_flag == "/tmp/STOP_NOW_42"
+        @test RunOpts(; stop_flag=nothing).stop_flag === nothing        # explicit opt-out
+        @test RunOpts(; stop_flag="/other").stop_flag == "/other"       # explicit wins
+    end
+end
+
 @testset "RunOpts: enforces heartbeat_interval < stale_after" begin
     @test_throws ArgumentError RunOpts(; heartbeat_interval=10.0, stale_after=5.0)
     @test_throws ArgumentError RunOpts(; heartbeat_interval=5.0, stale_after=5.0)
