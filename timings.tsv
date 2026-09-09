@@ -1,0 +1,17 @@
+atomicio/test_atomicio.jl	1.11
+eventlog/test_eventlog.jl	1.335
+init_workers/test_init_workers.jl	1.757
+init_workers/test_verify_workers_adversarial.jl	20.559
+manifest/test_manifest.jl	2.027
+manifest/test_manifest_const.jl	1.245
+preflight/test_preflight.jl	1.985
+run/test_double_run_safety.jl	10.48
+run/test_event_log_level.jl	8.667
+run/test_run_adversarial.jl	4.087
+run/test_run_keylock.jl	15.698
+run/test_run_kill_recovery.jl	4.425
+run/test_run_loop.jl	1.313
+run/test_run_manifest.jl	3.701
+run/test_run_minimal.jl	12.293
+run/test_run_stop_flag.jl	1.067
+run/test_run_worker_load.jl	15.869
