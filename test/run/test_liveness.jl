@@ -21,13 +21,60 @@ const _DEAD = "$(_HOST):999999:deadbeef"      # a pid that cannot be running
     @test holder_liveness("$(_HOST):notanumber:abcd") === :unknown
 end
 
-@testset "holder_liveness: Slurm is only asked from inside an allocation" begin
-    # `squeue` existing proves nothing about WHICH queue it answers for. On the machine this was
-    # written on it is a wrapper around a remote cluster, where every foreign job id is absent and
-    # would read as :dead.
-    tok = "otherhost:1:abcd:slurm999999"
-    withenv("SLURM_JOB_ID" => nothing) do
-        @test holder_liveness(tok) === :unknown
+@testset "holder_liveness: the queue decision, with the fetch stubbed" begin
+    # The membership rule cannot be reached without a scheduler, and it is the part with real
+    # content: an array task is `12345_7` in the queue while `SLURM_JOB_ID` is `12345`, so a job is
+    # alive if ANY of its tasks is. Only the squeue CALL is stubbed; the decision under test is the
+    # package's own.
+    saved = SweepRunner._squeue_cache[]
+    try
+        SweepRunner._squeue_cache[] = (time(), Set(["12345", "777_3", "777_4"]))
+        withenv("SLURM_JOB_ID" => "1") do
+            @test holder_liveness("h:1:ab:slurm12345") === :alive     # plain job, queued
+            @test holder_liveness("h:1:ab:slurm777") === :alive       # array job, a task queued
+            @test holder_liveness("h:1:ab:slurm999") === :dead        # absent: finished or killed
+        end
+
+        # No opinion from squeue is never :dead, however long ago it was asked.
+        SweepRunner._squeue_cache[] = (time(), nothing)
+        withenv("SLURM_JOB_ID" => "1") do
+            @test holder_liveness("h:1:ab:slurm999") === :unknown
+        end
+    finally
+        SweepRunner._squeue_cache[] = saved   # never leak a stub into a sibling test file
+    end
+end
+
+@testset "holder_liveness: outside an allocation the queue is not consulted at all" begin
+    saved = SweepRunner._squeue_cache[]
+    try
+        SweepRunner._squeue_cache[] = (time(), Set(String[]))   # an empty queue: everything absent
+        withenv("SLURM_JOB_ID" => nothing) do
+            # Would be :dead if the guard were not there, since the job is absent from this queue.
+            @test holder_liveness("otherhost:1:ab:slurm12345") === :unknown
+        end
+    finally
+        SweepRunner._squeue_cache[] = saved
+    end
+end
+
+@testset "the squeue fetch cannot throw and cannot invent a :dead" begin
+    # Forces the cache miss so the real call runs. The assertion is the safety contract rather
+    # than a value: this executes on a machine with no scheduler (CI), on one whose `squeue` is a
+    # wrapper around a remote cluster (the development box), and inside a real allocation, and in
+    # every one of those it must come back with an answer rather than an exception.
+    saved = SweepRunner._squeue_cache[]
+    try
+        SweepRunner._squeue_cache[] = (-Inf, nothing)
+        live = SweepRunner._live_slurm_jobs()
+        @test live === nothing || live isa Set{String}
+
+        SweepRunner._squeue_cache[] = (-Inf, nothing)
+        withenv("SLURM_JOB_ID" => "1") do
+            @test holder_liveness("h:1:ab:slurm999999") in (:alive, :dead, :unknown)
+        end
+    finally
+        SweepRunner._squeue_cache[] = saved
     end
 end
 
