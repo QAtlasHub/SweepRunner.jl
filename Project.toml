@@ -28,14 +28,16 @@ Logging = "1.11"
 ParamIO = "0.3, 0.4"
 Printf = "1.11"
 SHA = "0.7"
+Serialization = "1.11"
 SlurmClusterManager = "0.1, 1"
 TOML = "1"
 TestShards = "0.3"
 julia = "1.11"
 
 [extras]
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestShards = "acceef1d-f5e0-4fe4-a546-818dc56ce7b2"
 
 [targets]
-test = ["Test", "TestShards"]
+test = ["Serialization", "Test", "TestShards"]
