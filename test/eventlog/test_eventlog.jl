@@ -28,11 +28,17 @@ end
             :gave_up,
             :retry,
             :skip_complete,
+            :key_acquired,
+            :lock_lost,
+            :lock_reaped,
+            :reap_failed,
+            :worker_died,
+            :worker_lost,
         )
             log_event(log, k; info="test")
         end
         lines = readlines(log.path)
-        @test length(lines) == 10
+        @test length(lines) == 16
         for line in lines
             rec = JSON3.read(line)
             @test haskey(rec, :kind)

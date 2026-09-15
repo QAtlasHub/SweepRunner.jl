@@ -134,6 +134,11 @@ end
 
 _is_stopped(opts::RunOpts)::Bool = _stop_reason(opts) !== nothing
 
+# How many times a key whose worker DIED is handed to another one. Both dispatchers bound this,
+# `_run_pmap!` through `pmap`'s `retry_delays` and `_run_affinity!` by counting, and they have to
+# agree: the same bound expressed twice through unrelated mechanisms is how they drift apart.
+const _WORKER_DEATH_REDISPATCHES = 2
+
 # As of v0.3 the per-key lock lives ENTIRELY in DataVault's `.running`
 # sentinel — acquired atomically via `DataVault.acquire_running!`
 # (implemented with POSIX `link()`).  There is no longer a separate
@@ -348,13 +353,24 @@ end
 # Only `:dead` acts. `:unknown` is the common answer (a holder on another host with no Slurm id)
 # and leaves the timeout to decide, exactly as before.
 function _reap_if_dead!(vault::Vault, key::DataKey, stage::Symbol, log::EventLog)::Bool
+    # An `isfile` first: `running_owner` opens and reads, and the uncontended case is every key.
     DataVault.is_running(vault, key) || return false
-    owner = DataVault.running_owner(vault, key)
-    owner === nothing && return false          # unstamped: cannot be attributed, so cannot be judged
-    holder_liveness(owner) === :dead || return false
-    cleared = DataVault.clear_running!(vault, key, owner)
-    cleared && log_event(log, :lock_reaped; stage=stage, key=canonical(key), owner=owner)
-    return cleared
+    # Reaping is an OPTIMISATION over `stale_after`, so nothing in it may be fatal. Without this,
+    # an unlink that fails (a read-only status directory, an NFS hiccup) escapes `run!` and takes
+    # every other key in the round with it, none of which was attempted.
+    try
+        owner = DataVault.running_owner(vault, key)
+        owner === nothing && return false      # unstamped: cannot be attributed, so cannot be judged
+        holder_liveness(owner) === :dead || return false
+        cleared = DataVault.clear_running!(vault, key, owner)
+        cleared &&
+            log_event(log, :lock_reaped; stage=stage, key=canonical(key), owner=owner)
+        return cleared
+    catch e
+        e isa InterruptException && rethrow()
+        log_event(log, :reap_failed; stage=stage, key=canonical(key), err=_short_err(e))
+        return false
+    end
 end
 
 """
@@ -529,7 +545,7 @@ function _run_pmap!(
         pool,
         todo;
         on_error=identity,
-        retry_delays=ExponentialBackOff(; n=2),
+        retry_delays=ExponentialBackOff(; n=_WORKER_DEATH_REDISPATCHES),
         retry_check=(s, e) -> (s, e isa ProcessExitedException),
     ) do key
         return _run_one_with_lock!(work_fn, vault, key, stage, log, opts)
@@ -618,7 +634,7 @@ function _run_affinity!(
     # `retry_delays=ExponentialBackOff(; n=2)`; this dispatcher has to bound it too. Unbounded, a
     # key that reliably kills whoever takes it is handed to worker after worker forever, and the
     # faster a dead holder's lock is reclaimed the faster that cascade runs.
-    const_giveback_limit = 2
+    const_giveback_limit = _WORKER_DEATH_REDISPATCHES
     givebacks = zeros(Int, length(todo))
     _give_back!(i::Int)::Bool = lock(q) do
         givebacks[i] += 1

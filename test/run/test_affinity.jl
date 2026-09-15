@@ -230,8 +230,10 @@ end
 
             ndeaths = length(readdir(deaths))
             @info "poison key" ndeaths err = r.err done = r.done
-            @test ndeaths >= 1                        # the fixture really does kill workers
-            @test ndeaths <= 3                        # 1 dispatch + 2 give-backs, and no more
+            # Exactly 3, not a range: each worker's dispatch loop breaks after its first
+            # ProcessExitedException, so one initial dispatch plus two give-backs is the only
+            # reachable count. A range would still pass if the bound silently shrank to 1.
+            @test ndeaths == 1 + SweepRunner._WORKER_DEATH_REDISPATCHES
             @test !DataVault.is_done(v, ks[1])        # it cannot complete, and did not
             @test r.done == length(ks) - 1            # every OTHER key still finished
         finally

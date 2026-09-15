@@ -45,12 +45,16 @@ stay within that guarantee.
 | `lock_busy`     | another master holds the `.running` lock (acquire = `:busy`)      |
 | `lock_lost`     | our lock was reclaimed mid-work; result discarded (no double-run) |
 | `lock_reaped`   | a lock whose holder was shown dead was cleared without waiting     |
+| `reap_failed`   | reaping threw; the key falls back to the `stale_after` timeout     |
 | `lock_reclaimed`| (reserved, not currently emitted)                                 |
 | `error`         | `work_fn` threw on this attempt                                   |
 | `retry`         | another attempt will follow                                       |
 | `gave_up`       | all `max_attempts` attempts exhausted                             |
 | `skip_complete` | full-done early exit (manifest had every key)                     |
-| `worker_lost`   | every worker died with keys pending; the key was not attempted    |
+| `worker_died`   | the worker exited on this key every time it was dispatched, up to |
+|                 | the re-dispatch bound (includes `deaths`)                          |
+| `worker_lost`   | every worker died with keys still queued; this key was left for a  |
+|                 | later run rather than completed or failed                          |
 
 `:key_start` and `:lock_busy` are emitted at `:debug` level and are suppressed
 unless the `EventLog` is created with `min_level=:debug` (see `RunOpts.log_level`);

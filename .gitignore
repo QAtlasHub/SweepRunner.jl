@@ -2,3 +2,8 @@ docs/build/
 docs/src/assets/favicon.ico
 docs/src/assets/logo.png
 Manifest.toml
+
+# Coverage counters from `julia --code-coverage`. Written next to the source they measure,
+# so a `git add -A` after a local coverage run sweeps them in.
+*.cov
+*.info
