@@ -1,0 +1,13 @@
+# Two groups (L) of twelve keys each: wide enough that a worker staying on one group is visible
+# against the hopping the flat hand-out produces.
+[study]
+project_name  = "aff_test"
+total_samples = 1
+outdir        = "out"
+
+[datavault]
+path_keys = ["L", "J"]
+
+[[paramsets]]
+L = [8, 16]
+J = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]

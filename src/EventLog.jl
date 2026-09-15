@@ -14,18 +14,21 @@ using JSON3
 Append-only JSONL event log with a thread-safe per-`EventLog` lock.
 
 Each call to [`log_event`](@ref) writes one JSON object as a single line.
-Concurrent writes from multiple tasks (within one master) are serialized
-through an internal `ReentrantLock`. Concurrent writes from multiple
-_processes_ (separate masters) rely on POSIX `O_APPEND` atomicity, which
-is guaranteed for single `write` syscalls of length `< PIPE_BUF` (4 KiB);
-`log_event` composes each line as a single `String` and issues exactly
-one `write(io, line)` call to stay within that guarantee.
+Concurrent writes from multiple tasks are serialized through a
+`ReentrantLock` held per PATH, so several `EventLog` objects on one file
+share it. Concurrent writes from multiple _processes_ (separate masters)
+rely on POSIX `O_APPEND` atomicity, which is guaranteed for single `write`
+syscalls of length `< PIPE_BUF` (4 KiB); `log_event` composes each line as
+a single `String` and issues one `write` to an unbuffered descriptor to
+stay within that guarantee.
 
 # Fields
 
 - `path::String` — target JSONL file. Parent directory is created lazily on
   first [`log_event`](@ref).
-- `lock::ReentrantLock` — protects appends from same-process races.
+- `lock::ReentrantLock` — the per-path lock at construction time. [`log_event`](@ref) resolves the
+  lock from `path` rather than reading this field, so an `EventLog` that arrived on a worker by
+  deserialization (which skips the constructor) still serialises against its siblings there.
 
 # Event kinds used by `run!`
 
@@ -35,6 +38,8 @@ one `write(io, line)` call to stay within that guarantee.
 | :-------------- | :---------------------------------------------------------------- |
 | `stage_start`   | once at the top of `run!` when `todo` is non-empty                |
 | `stage_done`    | once at the bottom of `run!` when `todo` was non-empty            |
+| `key_acquired`  | the per-key lock was taken (includes `acq`); the only durable       |
+|                 | record of a claim, since a SIGKILL skips every later event         |
 | `key_start`     | before each `work_fn(key)` attempt (includes `attempt` field)     |
 | `key_done`      | after a successful `work_fn(key)` (includes `secs`, `attempt`)    |
 | `lock_busy`     | another master holds the `.running` lock (acquire = `:busy`)      |
@@ -44,6 +49,7 @@ one `write(io, line)` call to stay within that guarantee.
 | `retry`         | another attempt will follow                                       |
 | `gave_up`       | all `max_attempts` attempts exhausted                             |
 | `skip_complete` | full-done early exit (manifest had every key)                     |
+| `worker_lost`   | every worker died with keys pending; the key was not attempted    |
 
 `:key_start` and `:lock_busy` are emitted at `:debug` level and are suppressed
 unless the `EventLog` is created with `min_level=:debug` (see `RunOpts.log_level`);
@@ -67,7 +73,20 @@ struct EventLog
 end
 
 function EventLog(path::AbstractString; min_level::Symbol=:info)
-    return EventLog(String(path), ReentrantLock(), _level_value(min_level))
+    return EventLog(String(path), _path_lock(path), _level_value(min_level))
+end
+
+# One lock per PATH, process-wide, NOT one per `EventLog`. `run!` builds a fresh `EventLog` on every
+# call, so four concurrent masters in one process hold four objects pointing at one file and a
+# per-object lock serialises nothing between them.
+const _LOG_LOCKS = Dict{String,ReentrantLock}()
+const _LOG_LOCKS_GUARD = ReentrantLock()
+
+function _path_lock(path::AbstractString)::ReentrantLock
+    key = abspath(String(path))
+    return lock(_LOG_LOCKS_GUARD) do
+        return get!(ReentrantLock, _LOG_LOCKS, key)
+    end
 end
 
 # Severity ladder (à la Julia logging). Events below an `EventLog`'s `min_level`
@@ -92,9 +111,10 @@ Append one JSON object to `log.path` with fields `ts` (ISO-8601 local time),
 pairs passed via `kwargs`.
 
 The line is built in full (including the trailing newline) as a single
-`String`, then written with exactly one `write(io, line)` call inside an
-`open(path, "a")` block. This relies on POSIX `O_APPEND` atomicity so that
-cross-process writes do not tear each other's lines.
+`String` and written with one `write` syscall to an UNBUFFERED append-mode
+descriptor. Both halves matter: the syscall is what POSIX `O_APPEND`
+atomicity applies to, so cross-process writes do not tear each other's
+lines, and an `IOStream` would flush on its own boundaries instead.
 
 ```julia
 log_event(log, :key_done; stage=:phase1, key="N=8;J=1.0;#sample=1", secs=12.3)
@@ -116,10 +136,21 @@ function log_event(log::EventLog, kind::Symbol; level::Symbol=:info, kwargs...)
     # Build the full line with newline so a single `write` is one atomic
     # append on POSIX (given `O_APPEND` and size < PIPE_BUF).
     line = string(JSON3.write(rec), '\n')
-    lock(log.lock) do
+    # Resolved from the PATH, not taken from `log.lock`. `run!` serialises the `EventLog` to every
+    # worker, and deserialization rebuilds the struct without running the constructor, so the field
+    # that arrives on a worker is a private lock that serialises nothing against its siblings.
+    lock(_path_lock(log.path)) do
         mkpath(dirname(log.path))
-        open(log.path, "a") do io
-            return write(io, line)
+        fd = Base.Filesystem.open(
+            log.path,
+            Base.Filesystem.JL_O_WRONLY | Base.Filesystem.JL_O_CREAT |
+            Base.Filesystem.JL_O_APPEND,
+            0o644,
+        )
+        try
+            return write(fd, codeunits(line))
+        finally
+            close(fd)
         end
     end
     return nothing

@@ -69,6 +69,7 @@ include("EventLog.jl")
 include("Manifest.jl")
 include("InitWorkers.jl")
 include("Run.jl")
+include("Prerequisite.jl")
 include("Preflight.jl")
 
 end # module SweepRunner

@@ -17,7 +17,7 @@ using ParamIO: DataKey, canonical
 
 """
     RunOpts(; workers=:auto, max_attempts=3, stale_after=600.0,
-             heartbeat_interval=60.0, stop_flag=nothing)
+             heartbeat_interval=60.0, stop_flag=nothing, deadline=nothing)
 
 Execution options for [`run!`](@ref).
 
@@ -54,6 +54,21 @@ Execution options for [`run!`](@ref).
   that misspells it gets no error and no graceful stop, only a killed job.
   Pass `stop_flag=nothing` explicitly to opt out.
 
+  **Granularity: the flag is read between keys, not inside one.** A key already
+  in `work_fn` runs to completion, so the time between raising the flag and
+  `run!` returning is bounded by the longest key, which the caller usually
+  cannot predict.
+- `deadline::Union{Float64,Nothing} = nothing` — an absolute `time()` past which
+  no new key is handed out. The same mechanism as `stop_flag` with the same
+  in-key granularity, and the reason to have both is that a deadline is set in
+  ADVANCE: a batch job can subtract its longest expected key and the time its
+  summary needs from the end of its allocation, where a flag raised reactively
+  60 s before the wall clock cannot buy back a key that runs for ten minutes.
+
+  ```julia
+  RunOpts(deadline = time() + 25 * 60)   # stop dispatching 5 min before a 30 min job ends
+  ```
+
 # Example
 
 ```julia
@@ -69,6 +84,7 @@ struct RunOpts
     heartbeat_interval::Float64
     stop_flag::Union{String,Nothing}
     log_level::Symbol
+    deadline::Union{Float64,Nothing}
 end
 
 function RunOpts(;
@@ -78,6 +94,7 @@ function RunOpts(;
     heartbeat_interval::Real=60.0,
     stop_flag::Union{String,Nothing}=get(ENV, "SWEEPRUNNER_STOP_FLAG", nothing),
     log_level::Symbol=:info,
+    deadline::Union{Real,Nothing}=nothing,
 )
     workers in (:auto, :sequential) || throw(
         ArgumentError(
@@ -103,11 +120,19 @@ function RunOpts(;
         Float64(heartbeat_interval),
         stop_flag,
         log_level,
+        deadline === nothing ? nothing : Float64(deadline),
     )
 end
 
-# Internal: check if the stop flag has been raised.
-_is_stopped(opts::RunOpts)::Bool = opts.stop_flag !== nothing && isfile(opts.stop_flag)
+# Why the loop is stopping, so `:stage_done` can say which of the two fired rather than leaving
+# a reader to guess from the wall clock.
+function _stop_reason(opts::RunOpts)::Union{Symbol,Nothing}
+    opts.stop_flag !== nothing && isfile(opts.stop_flag) && return :flag
+    opts.deadline !== nothing && time() > opts.deadline && return :deadline
+    return nothing
+end
+
+_is_stopped(opts::RunOpts)::Bool = _stop_reason(opts) !== nothing
 
 # As of v0.3 the per-key lock lives ENTIRELY in DataVault's `.running`
 # sentinel — acquired atomically via `DataVault.acquire_running!`
@@ -160,6 +185,25 @@ Early skip (todo 10): on startup a stage-level Manifest is loaded. Keys
 already in the manifest are skipped — when all keys are done, the second
 run-through takes O(1) filesystem operations regardless of `length(keys)`.
 
+# Affinity
+
+`affinity` is `key -> value`, and turns the fan-out from "any free worker takes the next key" into
+"a free worker PREFERS a key whose `affinity` value it has already handled". Pass it when `work_fn`
+memoises something per group in worker-local state, so a worker that stays on a group pays the load
+once instead of once per key.
+
+    run!(work_fn, vault, keys; affinity = k -> param(k, "system.L"))
+
+A preference, not a partition: a worker is never idle while a key is pending, so a 200-key group
+does not serialise onto the worker that opened it. When a worker has nothing from its own groups
+left it takes from the group with the most work outstanding, which spreads workers over groups.
+
+Only affects the `pmap` path; the sequential path already visits keys in order.
+
+Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
+`:flag`, `:deadline`, or `nothing`, so a short stage is attributable without re-reading the clock.
+The full-done early exit returns the same field set rather than a shorter one.
+
 Contract:
 - `work_fn` is expected to be a pure function: given a `DataKey`, return a
   `Dict` payload to persist via `DataVault.save!`.
@@ -196,6 +240,7 @@ function run!(
     keys::AbstractVector{DataKey};
     opts::RunOpts=RunOpts(),
     load=nothing,
+    affinity=nothing,
 )
     stage = Symbol(vault.run)
     log_name = "events_$(gethostname())_$(getpid()).jsonl"
@@ -207,7 +252,17 @@ function run!(
 
     if isempty(todo)
         log_event(log, :skip_complete; stage=stage, total=length(keys))
-        return (stage=stage, done=0, err=0, skipped=length(keys), total=length(keys))
+        return (
+            stage=stage,
+            done=0,
+            err=0,
+            busy=0,
+            gave_up=0,
+            stop=0,
+            skipped=length(keys),
+            total=length(keys),
+            stopped_by=nothing,
+        )
     end
 
     log_event(log, :stage_start; stage=stage, total=length(keys), todo=length(todo))
@@ -223,7 +278,11 @@ function run!(
         _ensure_worker_modules(
             vcat([:ParamIO, :DataVault, :SweepRunner], _worker_module_names(load))
         )
-        _run_pmap!(work_fn, vault, todo, stage, log, opts)
+        if affinity === nothing
+            _run_pmap!(work_fn, vault, todo, stage, log, opts)
+        else
+            _run_affinity!(work_fn, vault, todo, stage, log, opts, affinity)
+        end
     else
         _run_sequential!(work_fn, vault, todo, stage, log, opts)
     end
@@ -256,6 +315,7 @@ function run!(
     # concurrent masters don't overwrite each other's completed keys.
     merge_and_save_manifest!(m)
 
+    stopped_by = _stop_reason(opts)
     log_event(
         log,
         :stage_done;
@@ -267,6 +327,7 @@ function run!(
         gave_up=n_gave_up,
         stop=n_stop,
         skipped=length(keys) - length(todo),
+        stopped_by=stopped_by === nothing ? nothing : String(stopped_by),
     )
     return (
         stage=stage,
@@ -277,6 +338,7 @@ function run!(
         stop=n_stop,
         skipped=length(keys) - length(todo),
         total=length(keys),
+        stopped_by=stopped_by,
     )
 end
 
@@ -322,6 +384,11 @@ function _run_one_with_lock!(
         return (key, :lock_busy)
     end
     # acq ∈ (:ok, :reclaimed) — we own the lock.
+
+    # Written at ACQUIRE, at :info, and flushed by `log_event`'s open/write/close. This is the
+    # only record that survives a SIGKILL mid-key: the `finally` below cannot run, so nothing
+    # later in this function gets to say the key was ever claimed.
+    log_event(log, :key_acquired; stage=stage, key=kstr, acq=String(acq))
 
     # Re-check after acquisition: another master may have finished this
     # key between our manifest read and our acquire.
@@ -469,6 +536,110 @@ function _run_pmap!(
 end
 
 """
+    _run_affinity!(work_fn, vault, todo, stage, log, opts, affinity) -> Vector{Tuple{DataKey,Symbol}}
+
+[`_run_pmap!`](@ref) with a PREFERENCE for keys whose `affinity` value the worker has already
+handled. A free worker takes a pending key from its most recently used group if one is left, and
+otherwise from the group with the most work outstanding, which spreads workers over groups instead
+of piling them onto one.
+
+A preference, never a partition. A worker is never idle while a key is pending, so a 200-key group
+does not serialise onto the worker that opened it.
+
+`pmap` is not used here because it hands out work itself. Its `ProcessExitedException` re-dispatch
+is reproduced: a key whose worker died goes back on the queue and the worker is dropped.
+"""
+function _run_affinity!(
+    work_fn::Function,
+    vault::Vault,
+    todo::AbstractVector{DataKey},
+    stage::Symbol,
+    log::EventLog,
+    opts::RunOpts,
+    affinity::Function,
+)
+    groups = Any[affinity(k) for k in todo]
+    by_group = Dict{Any,Vector{Int}}()
+    for (i, g) in enumerate(groups)
+        push!(get!(Vector{Int}, by_group, g), i)
+    end
+    # `pop!` takes from the end, so reverse to hand keys out in the caller's order. That order is
+    # load-bearing: a leading paramset is how a long acquisition is told which slice to close first.
+    for v in values(by_group)
+        reverse!(v)
+    end
+
+    out = Vector{Tuple{DataKey,Symbol}}(undef, length(todo))
+    # `Vector{Bool}`, not `BitVector`: adjacent bits share a word, so two tasks marking neighbouring
+    # indices would read-modify-write the same one.
+    filled = fill(false, length(todo))
+    q = ReentrantLock()
+    seen = Dict{Int,Vector{Any}}()
+
+    function _take!(pid::Int)
+        return lock(q) do
+            mine = get!(Vector{Any}, seen, pid)
+            for (j, g) in enumerate(mine)
+                v = get(by_group, g, nothing)
+                if v !== nothing && !isempty(v)
+                    j == 1 || (deleteat!(mine, j); pushfirst!(mine, g))
+                    return pop!(v)
+                end
+            end
+            best, bestn = nothing, 0
+            for (g, v) in by_group
+                length(v) > bestn && ((best, bestn) = (g, length(v)))
+            end
+            best === nothing && return nothing
+            pushfirst!(mine, best)
+            return pop!(by_group[best])
+        end
+    end
+
+    _give_back!(i::Int) = lock(q) do
+        return push!(get!(Vector{Int}, by_group, groups[i]), i)
+    end
+
+    @sync for pid in workers()
+        @async while true
+            i = _take!(pid)
+            i === nothing && break
+            key = todo[i]
+            res = try
+                remotecall_fetch(
+                    _run_one_with_lock!, pid, work_fn, vault, key, stage, log, opts
+                )
+            catch e
+                if e isa ProcessExitedException
+                    _give_back!(i)
+                    break
+                end
+                log_event(
+                    log,
+                    :error;
+                    stage=stage,
+                    key=canonical(key),
+                    attempt=0,
+                    err=_short_err(e),
+                )
+                (key, :error)
+            end
+            out[i] = res
+            filled[i] = true
+        end
+    end
+
+    # Every worker died while keys were still pending. Those keys were never attempted, so they are
+    # retriable rather than failed: `:lock_busy` is the outcome `run!` already counts that way.
+    for i in eachindex(todo)
+        filled[i] && continue
+        log_event(log, :worker_lost; stage=stage, key=canonical(todo[i]))
+        out[i] = (todo[i], :lock_busy)
+    end
+    return out
+end
+
+"""
     _run_one_with_retry!(work_fn, vault, key, kstr, stage, log, opts, lost) -> Symbol
 
 Execute `work_fn(key)` up to `opts.max_attempts` times. Returns:
@@ -534,8 +705,8 @@ function _short_err(e)::String
 end
 
 """
-    run_loop!(work_fn, vault, keys; opts=RunOpts(),
-              max_empty_rounds=3, idle_sleep=30.0, load=nothing)
+    run_loop!(work_fn, vault, keys; opts=RunOpts(), max_empty_rounds=3,
+              idle_sleep=30.0, load=nothing, prerequisite=nothing) -> NamedTuple
 
 Work-stealing loop that repeatedly calls [`run!`](@ref) until there is no
 more work to do. This is the infra equivalent of FiniteTemperature.jl's
@@ -543,13 +714,41 @@ more work to do. This is the infra equivalent of FiniteTemperature.jl's
 
 The loop exits when:
 - `max_empty_rounds` consecutive rounds produce zero new completions, or
-- `opts.stop_flag` is raised (graceful shutdown).
+- `opts.stop_flag` is raised, or `opts.deadline` has passed.
 
 Default parameters (`max_empty_rounds=3`, `idle_sleep=30.0`) are the
 battle-tested values from FiniteTemperature.jl.
 
 `load` is forwarded verbatim to every [`run!`](@ref) call (see its docstring) — name the work
 module(s) the workers need and the loop handles the per-round broadcast.
+
+# Prerequisite
+
+`run!` locks the KEY, so no two workers compute the same key. Work shared BETWEEN keys has to live
+inside `work_fn`, and there it has no protection at all: every worker that wants a setup not yet on
+disk builds it itself.
+
+Pass a [`Prerequisite`](@ref) and that setup becomes its own key space, run to completion by
+[`run_prerequisite!`](@ref) before the dependent stage starts. It then gets the same locking,
+resume and provenance as any other stage, and its cost is recorded in its own payload instead of
+landing on whichever dependent key happened to run first.
+
+    run_loop!(work_fn, vault, keys;
+              prerequisite = Prerequisite(prep_fn, prep_vault, derived_keys),
+              opts = opts)
+
+If the prerequisite does not complete, the dependent stage does NOT start, and the returned
+`prerequisite` field says why. Running it anyway would spend the allocation on keys whose setup is
+known to be missing.
+
+**SweepRunner does not know which dependent key needs which prerequisite key.** The dependency is
+one level deep and resolved inside `work_fn`, so this is "all of the prerequisite, then all of the
+dependents", not a DAG.
+
+`affinity` is forwarded verbatim to every [`run!`](@ref) call.
+
+Returns `(; ran, rounds, done, stopped_by, prerequisite)`. `ran` is `false` exactly when a
+prerequisite blocked the stage.
 """
 function run_loop!(
     work_fn::Function,
@@ -559,13 +758,27 @@ function run_loop!(
     max_empty_rounds::Int=3,
     idle_sleep::Float64=30.0,
     load=nothing,
+    prerequisite=nothing,
+    affinity=nothing,
 )
+    pre = nothing
+    if prerequisite !== nothing
+        pre = run_prerequisite!(prerequisite; opts=opts, load=load, poll=idle_sleep)
+        pre.complete || return (;
+            ran=false, rounds=0, done=0, stopped_by=pre.stopped_by, prerequisite=pre
+        )
+    end
+
     empty_count = 0
+    rounds = 0
+    n_done = 0
     while true
         if _is_stopped(opts)
             break
         end
-        result = run!(work_fn, vault, keys; opts=opts, load=load)
+        rounds += 1
+        result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
+        n_done += result.done
         if result.done > 0
             empty_count = 0
             continue
@@ -576,7 +789,13 @@ function run_loop!(
         end
         sleep(idle_sleep)
     end
-    return nothing
+    return (;
+        ran=true,
+        rounds=rounds,
+        done=n_done,
+        stopped_by=_stop_reason(opts),
+        prerequisite=pre,
+    )
 end
 
 export RunOpts, run!, run_loop!, manifest_root, load_manifest

@@ -37,12 +37,32 @@ and the store from [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl).
   (a single `manifest.jld2` read), not O(N) per-key `.done` stats.
   Benchmark: 3600 keys warm re-run ≈ 3.5 ms.
 - **Structured events** — JSONL event log atomic across concurrent writers;
-  per-item `println` is a non-goal, by design.
+  per-item `println` is a non-goal, by design. Every lock acquisition writes a
+  flushed `key_acquired` line, so a run that a `kill -9` truncated still says
+  which keys it had claimed; the status tree cannot, because a key that was
+  claimed and never finished leaves no `.done` and no `.failed`.
+- **A stop flag and a deadline** — `RunOpts(stop_flag=...)` is read between keys
+  and so is `RunOpts(deadline=time() + 25*60)`. The difference is when you set
+  it: a deadline is budgeted in advance, so a batch job can subtract its longest
+  expected key and reserve the tail of its allocation for the summary it needs
+  to print. Neither interrupts a key already inside `work_fn`; `run!` reports
+  which one fired as `result.stopped_by`.
 - **One entry point for all parallel modes** — `init_workers!(mode=:auto)`
   dispatches to `:sequential` / `:threads` / `:distributed` / `:slurm`
   depending on environment.
 - **Pure work functions** — your physics is a plain
   `(DataKey) -> Dict`, IO/locking/logging live in the runtime.
+- **Worker affinity** — `run!(...; affinity = k -> ...)` makes a free worker
+  prefer a key whose group it has already handled, so worker-local memoisation
+  of a shared setup is hit instead of reloaded. A preference, never a partition:
+  no worker idles while a key is pending. Measured, 24 keys over 2 groups on 8
+  workers: **8 group changes without it, 0 with.**
+- **Prerequisite stages** — `run!` locks the KEY, so work SHARED between keys
+  has nowhere to live but inside `work_fn`, where every worker that wants a
+  setup not yet on disk builds it itself. A `Prerequisite` makes that setup its
+  own key space, run to completion first, with the same locking, resume and
+  provenance. Measured, 8 concurrent processes over 16 keys sharing 2 setups:
+  **16 builds inside `work_fn`, 2 with a prerequisite.**
 
 ## Quick start
 
@@ -66,6 +86,35 @@ SweepRunner.run!(work_fn, vault, keys)
 
 Re-running the same script after completion: `:skip_complete` is logged and
 the process exits within milliseconds regardless of `length(keys)`.
+
+### Shared setup
+
+When many keys need one expensive thing, give that thing its own key space:
+
+```julia
+using ParamIO, DataVault, SweepRunner
+
+spec  = ParamIO.load("config.toml")
+main  = DataVault.Vault("config.toml"; run="dependent")
+prep  = DataVault.Vault("config.toml"; run="setup")
+
+# The axes the setup actually depends on. ParamIO.project derives this from the
+# same spec, so the two key spaces cannot drift apart by hand.
+derived = ParamIO.expand(ParamIO.project(spec, ["system.L", "model.lambda", "thermal.beta"]))
+
+run_loop!(work_fn, main, ParamIO.expand(spec);
+          prerequisite = Prerequisite(prep_fn, prep, derived),
+          affinity     = k -> ParamIO.param(k, "system.L"),
+          opts         = RunOpts(deadline = time() + 25*60))
+```
+
+`prerequisite` removes the duplicated *build*; `affinity` removes the repeated *load* of what it
+built. The second only matters once the first is in place.
+
+The prerequisite is a **barrier**: `run_loop!` does not start the dependent stage until every setup
+key is done, and if one cannot be built it does not start it at all. The dependency is one level
+deep and resolved inside `work_fn`, so this is "all of the setup, then all of the dependents", not
+a DAG.
 
 ## Phase chaining without `Stage` / `DAG`
 
