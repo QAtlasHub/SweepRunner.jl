@@ -342,6 +342,21 @@ function run!(
     )
 end
 
+# Clear a `.running` whose holder is provably gone, so the key is retriable NOW rather than in
+# `stale_after`. Returns whether anything was cleared.
+#
+# Only `:dead` acts. `:unknown` is the common answer (a holder on another host with no Slurm id)
+# and leaves the timeout to decide, exactly as before.
+function _reap_if_dead!(vault::Vault, key::DataKey, stage::Symbol, log::EventLog)::Bool
+    DataVault.is_running(vault, key) || return false
+    owner = DataVault.running_owner(vault, key)
+    owner === nothing && return false          # unstamped: cannot be attributed, so cannot be judged
+    holder_liveness(owner) === :dead || return false
+    cleared = DataVault.clear_running!(vault, key, owner)
+    cleared && log_event(log, :lock_reaped; stage=stage, key=canonical(key), owner=owner)
+    return cleared
+end
+
 """
     _run_one_with_lock!(work_fn, vault, key, stage, log, opts) -> (DataKey, Symbol)
 
@@ -375,10 +390,15 @@ function _run_one_with_lock!(
         return (key, :stop)
     end
 
+    # A lock whose holder can be SHOWN to be gone does not have to wait out `stale_after`. The
+    # clear is owner-checked, so it is a no-op if the holder changed since the question was asked.
+    _reap_if_dead!(vault, key, stage, log)
+
     # DataVault owns the lock file.  `acquire_running!` is atomic on
     # NFS via POSIX `link()`: concurrent masters see at most one
     # `:ok` / `:reclaimed`; the losers see `:busy`.
-    acq = DataVault.acquire_running!(vault, key; stale_after=opts.stale_after)
+    tok = owner_token()
+    acq = DataVault.acquire_running!(vault, key, tok; stale_after=opts.stale_after)
     if acq === :busy
         log_event(log, :lock_busy; level=:debug, stage=stage, key=kstr)
         return (key, :lock_busy)
@@ -393,7 +413,7 @@ function _run_one_with_lock!(
     # Re-check after acquisition: another master may have finished this
     # key between our manifest read and our acquire.
     if DataVault.is_done(vault, key)
-        DataVault.clear_running!(vault, key)
+        DataVault.clear_running!(vault, key, tok)
         return (key, :already_done)
     end
 
@@ -403,14 +423,12 @@ function _run_one_with_lock!(
     # the stop signal thread-safe; a short sleep tick keeps finally
     # cleanup responsive (the earlier fixed 60-s sleep would block the
     # whole shutdown until the next heartbeat tick).
-    # `lost[]` is raised by the heartbeat task if it observes that a sibling
-    # reclaimed our lock (we stalled past `stale_after`). `_run_one_with_retry!`
-    # checks it before `save!`, and the `finally` below skips `clear_running!`
-    # when lost, so we neither commit on top of nor delete the lock now owned by
-    # the reclaiming master. Detection is BEST-EFFORT: `refresh_running!` is
-    # existence-based, so a reclaim is reliably caught only via stale-reclaim or
-    # the brief window the lock file is absent. A fully race-free guarantee needs
-    # owner-stamped locks in DataVault (see PR notes).
+    # `lost[]` is raised by the heartbeat task if it observes that a sibling reclaimed our lock (we
+    # stalled past `stale_after`). `_run_one_with_retry!` checks it before `save!`, and the
+    # `finally` below skips `clear_running!` when lost, so we neither commit on top of nor delete
+    # the lock now owned by the reclaiming master. The refresh is OWNER-CHECKED (DataVault 0.8.1),
+    # so a reclaim that has already happened is seen on the next beat; the previous
+    # existence-based form returned `true` against the reclaimer's own file.
     hb_stop = Threads.Atomic{Bool}(false)
     lost = Threads.Atomic{Bool}(false)
     hb_task = Threads.@spawn begin
@@ -425,7 +443,7 @@ function _run_one_with_lock!(
                 # lock, e.g. NFS hiccup) both mean "treat as lost": stop
                 # heartbeating and signal it, rather than silently dying.
                 alive = try
-                    DataVault.refresh_running!(vault, key)
+                    DataVault.refresh_running!(vault, key, tok)
                 catch
                     false
                 end
@@ -452,7 +470,7 @@ function _run_one_with_lock!(
         # `clear_running!` is owner-blind (`isfile && rm`), so clearing it would
         # delete THEIR lock and re-open double-execution. On `:ok`, `mark_done!`
         # already removed our `.running`; `clear_running!` is otherwise idempotent.
-        lost[] || DataVault.clear_running!(vault, key)
+        lost[] || DataVault.clear_running!(vault, key, tok)
     end
 
     return (key, outcome)
@@ -596,8 +614,17 @@ function _run_affinity!(
         end
     end
 
-    _give_back!(i::Int) = lock(q) do
-        return push!(get!(Vector{Int}, by_group, groups[i]), i)
+    # `pmap` bounds its own `ProcessExitedException` re-dispatch with
+    # `retry_delays=ExponentialBackOff(; n=2)`; this dispatcher has to bound it too. Unbounded, a
+    # key that reliably kills whoever takes it is handed to worker after worker forever, and the
+    # faster a dead holder's lock is reclaimed the faster that cascade runs.
+    const_giveback_limit = 2
+    givebacks = zeros(Int, length(todo))
+    _give_back!(i::Int)::Bool = lock(q) do
+        givebacks[i] += 1
+        givebacks[i] > const_giveback_limit && return false
+        push!(get!(Vector{Int}, by_group, groups[i]), i)
+        return true
     end
 
     @sync for pid in workers()
@@ -611,7 +638,20 @@ function _run_affinity!(
                 )
             catch e
                 if e isa ProcessExitedException
-                    _give_back!(i)
+                    # Requeued, or out of attempts: a key that has taken down `const_giveback_limit`
+                    # workers is reported rather than handed to the next one.
+                    if !_give_back!(i)
+                        log_event(
+                            log,
+                            :gave_up;
+                            stage=stage,
+                            key=canonical(key),
+                            attempts=const_giveback_limit + 1,
+                            err="worker exited on this key every time it was dispatched",
+                        )
+                        out[i] = (key, :error)
+                        filled[i] = true
+                    end
                     break
                 end
                 log_event(

@@ -10,9 +10,9 @@ using SweepRunner, Test, DataVault, ParamIO
 const _BUSY_CFG = joinpath(@__DIR__, "fixtures", "study.toml")
 
 # Fast constants so the wait is seconds. `heartbeat_interval` must stay under `stale_after`.
-_opts(; kw...) = RunOpts(;
-    workers=:sequential, stale_after=3.0, heartbeat_interval=1.0, kw...
-)
+function _opts(; kw...)
+    return RunOpts(; workers=:sequential, stale_after=3.0, heartbeat_interval=1.0, kw...)
+end
 const _BUDGET = 3.0 + 2 * 0.5   # opts.stale_after + 2 * idle_sleep
 
 function with_tail(f)

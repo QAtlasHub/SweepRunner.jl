@@ -44,6 +44,7 @@ stay within that guarantee.
 | `key_done`      | after a successful `work_fn(key)` (includes `secs`, `attempt`)    |
 | `lock_busy`     | another master holds the `.running` lock (acquire = `:busy`)      |
 | `lock_lost`     | our lock was reclaimed mid-work; result discarded (no double-run) |
+| `lock_reaped`   | a lock whose holder was shown dead was cleared without waiting     |
 | `lock_reclaimed`| (reserved, not currently emitted)                                 |
 | `error`         | `work_fn` threw on this attempt                                   |
 | `retry`         | another attempt will follow                                       |

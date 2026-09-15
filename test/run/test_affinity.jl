@@ -155,38 +155,85 @@ end
 end
 
 @testset "affinity: a worker that dies hands its key back instead of losing it" begin
-    # The fault tolerance `pmap` gives through `retry_check`, which this dispatcher has to
-    # reproduce by hand. One key kills its worker outright with `_exit`, so remotecall_fetch sees
-    # ProcessExitedException rather than a caught error.
+    # The fault tolerance `pmap` gives through `retry_check`, which this dispatcher reproduces by
+    # hand. The model is PREEMPTION: the wall clock takes one worker out mid-key, and the key must
+    # survive that. A marker file makes the death happen exactly once, so the next worker to take
+    # the key completes it, which is what a preempted key does.
     with_workers(3) do
         outdir = mktempdir()
         try
             v = DataVault.Vault(_AFF_CFG; run="died", outdir=outdir)
             ks = DataVault.keys(v)
             victim = ParamIO.canonical(ks[1])
+            fuse = joinpath(outdir, "fuse")
             work = k -> begin
-                if ParamIO.canonical(k) == victim
+                if ParamIO.canonical(k) == victim && !isfile(fuse)
+                    touch(fuse)
                     ccall(:_exit, Cvoid, (Cint,), 1)
                 end
                 sleep(0.01)
                 return Dict{String,Any}("x" => 1)
             end
 
-            # stale_after short enough that the dead worker's abandoned .running is reclaimable on
-            # the next pass; without that the key stays :busy for its whole duration.
-            o = RunOpts(; stale_after=2.0, heartbeat_interval=1.0)
-            r = run!(work, v, ks; opts=o, affinity=group_of)
+            r = run!(
+                work,
+                v,
+                ks;
+                opts=RunOpts(; stale_after=2.0, heartbeat_interval=1.0),
+                affinity=group_of,
+            )
 
-            # It returned rather than hanging, and the loss was not counted as an error.
-            @test r.done == length(ks) - 1
+            # It returned rather than hanging, and the preempted key was re-dispatched and
+            # finished inside the SAME run: the dead worker's lock carries its owner, and that
+            # owner is a pid on this host that no longer exists.
+            @test isfile(fuse)                       # the death really happened
+            @test DataVault.is_done(v, ks[1])
+            @test r.done == length(ks)
             @test r.err == 0
-            @test !DataVault.is_done(v, ks[1])
+        finally
+            rm(outdir; recursive=true, force=true)
+        end
+    end
+end
 
-            # And the key is retriable: a later pass, once the abandoned lock is stale, gets it.
-            sleep(2.2)
-            r2 = run!(k -> Dict{String,Any}("x" => 1), v, ks; opts=o, affinity=group_of)
-            @test r2.done == 1
-            @test all(k -> DataVault.is_done(v, k), ks)
+@testset "affinity: a key that kills its worker is re-dispatched a BOUNDED number of times" begin
+    # `pmap` bounds its own ProcessExitedException re-dispatch (`ExponentialBackOff(; n=2)`); this
+    # dispatcher has to as well. Unbounded, a key that kills whoever takes it is handed to worker
+    # after worker with no limit, and reclaiming a dead holder's lock quickly, which this branch
+    # adds, only makes that spin faster.
+    #
+    # Four workers so the limit binds before the pool is exhausted: one initial dispatch plus two
+    # give-backs is three deaths, leaving a live worker to observe the give-up.
+    with_workers(4) do
+        outdir = mktempdir()
+        try
+            v = DataVault.Vault(_AFF_CFG; run="poison", outdir=outdir)
+            ks = DataVault.keys(v)
+            poison = ParamIO.canonical(ks[1])
+            deaths = joinpath(outdir, "deaths")
+            mkpath(deaths)
+            work = k -> begin
+                if ParamIO.canonical(k) == poison
+                    touch(joinpath(deaths, "d$(Distributed.myid())"))
+                    ccall(:_exit, Cvoid, (Cint,), 1)
+                end
+                return Dict{String,Any}("x" => 1)
+            end
+
+            r = run!(
+                work,
+                v,
+                ks;
+                opts=RunOpts(; stale_after=2.0, heartbeat_interval=1.0),
+                affinity=group_of,
+            )
+
+            ndeaths = length(readdir(deaths))
+            @info "poison key" ndeaths err = r.err done = r.done
+            @test ndeaths >= 1                        # the fixture really does kill workers
+            @test ndeaths <= 3                        # 1 dispatch + 2 give-backs, and no more
+            @test !DataVault.is_done(v, ks[1])        # it cannot complete, and did not
+            @test r.done == length(ks) - 1            # every OTHER key still finished
         finally
             rm(outdir; recursive=true, force=true)
         end
