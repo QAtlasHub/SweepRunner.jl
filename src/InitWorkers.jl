@@ -184,9 +184,15 @@ end
     verify_workers!()
 
 Probe each Distributed worker for hostname, Julia threads, BLAS threads,
-and CPU affinity. Prints a summary table and emits a `@warn` if any
-worker has `BLAS.get_num_threads() > 1` (a common cause of OpenBLAS
-segfaults in multi-process Julia).
+and CPU affinity. Prints a summary table, then ONE `@warn` carrying how many
+workers have `BLAS.get_num_threads() > 1`.
+
+That setting is reported, not diagnosed. It is a known cause of OpenBLAS
+segfaults in multi-process Julia, but on a 2-site TDVP workload (10 sites,
+chi=20) ms/step was flat from 1 to 36 threads and ~250 completed keys at
+`blas=16` produced no segfault, so the warning does not claim the setting is
+wrong here. It used to fire per worker: 287 lines on a 72-node allocation,
+interleaved with the rows of the table above it.
 
 Ported from FiniteTemperature.jl `Parallel/Slurm.jl::print_worker_identities`.
 """
@@ -225,6 +231,7 @@ function verify_workers!()
         ) for p in workers()
     ]
 
+    nhot = 0
     for f in futures
         pid, host, nth, blas, cpuset = fetch(f)
         @printf(
@@ -235,10 +242,14 @@ function verify_workers!()
             blas,
             cpuset
         )
-        if blas > 1
-            @warn "Worker $pid: BLAS threads=$blas > 1 — OpenBLAS segfault risk"
-        end
+        blas > 1 && (nhot += 1)
     end
+    # One line, after the table rather than interleaved with it. Per worker this was 287 lines on
+    # a 72-node allocation, which is the table's readability spent on a risk that has not been
+    # measured on this workload.
+    nhot > 0 &&
+        @warn "$nhot of $(nworkers()) workers have BLAS threads > 1 (OpenBLAS segfault risk under multi-process Julia). Set OPENBLAS_NUM_THREADS=1 if you hit one." maxlog =
+            1
     println()
     flush(stdout)
     return nothing

@@ -17,7 +17,7 @@ using ParamIO: DataKey, canonical
 
 """
     RunOpts(; workers=:auto, max_attempts=3, stale_after=600.0,
-             heartbeat_interval=60.0, stop_flag=nothing)
+             heartbeat_interval=60.0, stop_flag=nothing, deadline=nothing)
 
 Execution options for [`run!`](@ref).
 
@@ -54,6 +54,21 @@ Execution options for [`run!`](@ref).
   that misspells it gets no error and no graceful stop, only a killed job.
   Pass `stop_flag=nothing` explicitly to opt out.
 
+  **Granularity: the flag is read between keys, not inside one.** A key already
+  in `work_fn` runs to completion, so the time between raising the flag and
+  `run!` returning is bounded by the longest key, which the caller usually
+  cannot predict.
+- `deadline::Union{Float64,Nothing} = nothing` — an absolute `time()` past which
+  no new key is handed out. The same mechanism as `stop_flag` with the same
+  in-key granularity, and the reason to have both is that a deadline is set in
+  ADVANCE: a batch job can subtract its longest expected key and the time its
+  summary needs from the end of its allocation, where a flag raised reactively
+  60 s before the wall clock cannot buy back a key that runs for ten minutes.
+
+  ```julia
+  RunOpts(deadline = time() + 25 * 60)   # stop dispatching 5 min before a 30 min job ends
+  ```
+
 # Example
 
 ```julia
@@ -69,6 +84,7 @@ struct RunOpts
     heartbeat_interval::Float64
     stop_flag::Union{String,Nothing}
     log_level::Symbol
+    deadline::Union{Float64,Nothing}
 end
 
 function RunOpts(;
@@ -78,6 +94,7 @@ function RunOpts(;
     heartbeat_interval::Real=60.0,
     stop_flag::Union{String,Nothing}=get(ENV, "SWEEPRUNNER_STOP_FLAG", nothing),
     log_level::Symbol=:info,
+    deadline::Union{Real,Nothing}=nothing,
 )
     workers in (:auto, :sequential) || throw(
         ArgumentError(
@@ -103,11 +120,19 @@ function RunOpts(;
         Float64(heartbeat_interval),
         stop_flag,
         log_level,
+        deadline === nothing ? nothing : Float64(deadline),
     )
 end
 
-# Internal: check if the stop flag has been raised.
-_is_stopped(opts::RunOpts)::Bool = opts.stop_flag !== nothing && isfile(opts.stop_flag)
+# Why the loop is stopping, so `:stage_done` can say which of the two fired rather than leaving
+# a reader to guess from the wall clock.
+function _stop_reason(opts::RunOpts)::Union{Symbol,Nothing}
+    opts.stop_flag !== nothing && isfile(opts.stop_flag) && return :flag
+    opts.deadline !== nothing && time() > opts.deadline && return :deadline
+    return nothing
+end
+
+_is_stopped(opts::RunOpts)::Bool = _stop_reason(opts) !== nothing
 
 # As of v0.3 the per-key lock lives ENTIRELY in DataVault's `.running`
 # sentinel — acquired atomically via `DataVault.acquire_running!`
@@ -160,6 +185,10 @@ Early skip (todo 10): on startup a stage-level Manifest is loaded. Keys
 already in the manifest are skipped — when all keys are done, the second
 run-through takes O(1) filesystem operations regardless of `length(keys)`.
 
+Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
+`:flag`, `:deadline`, or `nothing`, so a short stage is attributable without re-reading the clock.
+The full-done early exit returns the same field set rather than a shorter one.
+
 Contract:
 - `work_fn` is expected to be a pure function: given a `DataKey`, return a
   `Dict` payload to persist via `DataVault.save!`.
@@ -207,7 +236,17 @@ function run!(
 
     if isempty(todo)
         log_event(log, :skip_complete; stage=stage, total=length(keys))
-        return (stage=stage, done=0, err=0, skipped=length(keys), total=length(keys))
+        return (
+            stage=stage,
+            done=0,
+            err=0,
+            busy=0,
+            gave_up=0,
+            stop=0,
+            skipped=length(keys),
+            total=length(keys),
+            stopped_by=nothing,
+        )
     end
 
     log_event(log, :stage_start; stage=stage, total=length(keys), todo=length(todo))
@@ -256,6 +295,7 @@ function run!(
     # concurrent masters don't overwrite each other's completed keys.
     merge_and_save_manifest!(m)
 
+    stopped_by = _stop_reason(opts)
     log_event(
         log,
         :stage_done;
@@ -267,6 +307,7 @@ function run!(
         gave_up=n_gave_up,
         stop=n_stop,
         skipped=length(keys) - length(todo),
+        stopped_by=stopped_by === nothing ? nothing : String(stopped_by),
     )
     return (
         stage=stage,
@@ -277,6 +318,7 @@ function run!(
         stop=n_stop,
         skipped=length(keys) - length(todo),
         total=length(keys),
+        stopped_by=stopped_by,
     )
 end
 
@@ -322,6 +364,11 @@ function _run_one_with_lock!(
         return (key, :lock_busy)
     end
     # acq ∈ (:ok, :reclaimed) — we own the lock.
+
+    # Written at ACQUIRE, at :info, and flushed by `log_event`'s open/write/close. This is the
+    # only record that survives a SIGKILL mid-key: the `finally` below cannot run, so nothing
+    # later in this function gets to say the key was ever claimed.
+    log_event(log, :key_acquired; stage=stage, key=kstr, acq=String(acq))
 
     # Re-check after acquisition: another master may have finished this
     # key between our manifest read and our acquire.

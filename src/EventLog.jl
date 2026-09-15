@@ -35,6 +35,8 @@ one `write(io, line)` call to stay within that guarantee.
 | :-------------- | :---------------------------------------------------------------- |
 | `stage_start`   | once at the top of `run!` when `todo` is non-empty                |
 | `stage_done`    | once at the bottom of `run!` when `todo` was non-empty            |
+| `key_acquired`  | the per-key lock was taken (includes `acq`); the only durable       |
+|                 | record of a claim, since a SIGKILL skips every later event         |
 | `key_start`     | before each `work_fn(key)` attempt (includes `attempt` field)     |
 | `key_done`      | after a successful `work_fn(key)` (includes `secs`, `attempt`)    |
 | `lock_busy`     | another master holds the `.running` lock (acquire = `:busy`)      |

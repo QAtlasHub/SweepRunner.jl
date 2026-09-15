@@ -37,7 +37,16 @@ and the store from [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl).
   (a single `manifest.jld2` read), not O(N) per-key `.done` stats.
   Benchmark: 3600 keys warm re-run ≈ 3.5 ms.
 - **Structured events** — JSONL event log atomic across concurrent writers;
-  per-item `println` is a non-goal, by design.
+  per-item `println` is a non-goal, by design. Every lock acquisition writes a
+  flushed `key_acquired` line, so a run that a `kill -9` truncated still says
+  which keys it had claimed; the status tree cannot, because a key that was
+  claimed and never finished leaves no `.done` and no `.failed`.
+- **A stop flag and a deadline** — `RunOpts(stop_flag=...)` is read between keys
+  and so is `RunOpts(deadline=time() + 25*60)`. The difference is when you set
+  it: a deadline is budgeted in advance, so a batch job can subtract its longest
+  expected key and reserve the tail of its allocation for the summary it needs
+  to print. Neither interrupts a key already inside `work_fn`; `run!` reports
+  which one fired as `result.stopped_by`.
 - **One entry point for all parallel modes** — `init_workers!(mode=:auto)`
   dispatches to `:sequential` / `:threads` / `:distributed` / `:slurm`
   depending on environment.

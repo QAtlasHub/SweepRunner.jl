@@ -18,6 +18,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 using SweepRunner, Test
+using Logging
 using Distributed, LinearAlgebra
 
 @testset "verify_workers! survives workers without SweepRunner" begin
@@ -63,18 +64,47 @@ using Distributed, LinearAlgebra
     end
 end
 
-@testset "verify_workers!: BLAS threads > 1 emits warning" begin
+@testset "verify_workers!: BLAS threads > 1 warns ONCE, with the count" begin
+    # Three workers, all hot. The bug this pins is volume: one warning per worker put 287 lines
+    # between the rows of the table the function had just printed.
     nprocs() > 1 && rmprocs(workers())
     project = dirname(Base.active_project())
-    addprocs(1; exeflags="--project=$project")
+    addprocs(3; exeflags="--project=$project")
 
     try
         @everywhere workers() Core.eval(Main, :(using LinearAlgebra))
-        # Deliberately set a high BLAS thread count on the worker
         @everywhere workers() LinearAlgebra.BLAS.set_num_threads(4)
 
-        # Capture warnings via Test.@test_logs
-        @test_logs (:warn, r"BLAS threads=4") SweepRunner.verify_workers!()
+        logger = Test.TestLogger(; min_level=Logging.Warn)
+        Logging.with_logger(logger) do
+            return SweepRunner.verify_workers!()
+        end
+        warnings = filter(r -> r.level == Logging.Warn, logger.logs)
+
+        @test length(warnings) == 1
+        @test occursin("3 of 3 workers", warnings[1].message)
+        @test occursin("BLAS threads > 1", warnings[1].message)
+    finally
+        rmprocs(workers())
+    end
+end
+
+@testset "verify_workers!: no warning when no worker is hot" begin
+    # Control for the testset above: the counter must be able to read zero, or `== 1` there is
+    # just "the warning is unconditional".
+    nprocs() > 1 && rmprocs(workers())
+    project = dirname(Base.active_project())
+    addprocs(2; exeflags="--project=$project")
+
+    try
+        @everywhere workers() Core.eval(Main, :(using LinearAlgebra))
+        @everywhere workers() LinearAlgebra.BLAS.set_num_threads(1)
+
+        logger = Test.TestLogger(; min_level=Logging.Warn)
+        Logging.with_logger(logger) do
+            return SweepRunner.verify_workers!()
+        end
+        @test isempty(filter(r -> r.level == Logging.Warn, logger.logs))
     finally
         rmprocs(workers())
     end
