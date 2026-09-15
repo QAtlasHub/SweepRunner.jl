@@ -713,8 +713,16 @@ more work to do. This is the infra equivalent of FiniteTemperature.jl's
 `_work_loop` driver.
 
 The loop exits when:
-- `max_empty_rounds` consecutive rounds produce zero new completions, or
+- `max_empty_rounds` consecutive rounds produce zero new completions AND leave nothing held by a
+  sibling, or
 - `opts.stop_flag` is raised, or `opts.deadline` has passed.
+
+A round that completes nothing but finds keys `:lock_busy` does NOT count toward
+`max_empty_rounds` until `opts.stale_after` has been waited out. Those keys are either being
+worked on by a live sibling, or held by one the wall clock killed, and `stale_after` is what
+separates the two: past it, `acquire_running!` reclaims the lock on the next attempt. Returning
+before then leaves the campaign short and reports nothing, because `max_empty_rounds *
+idle_sleep` (90 s by default) is an order of magnitude under `stale_after` (600 s).
 
 Default parameters (`max_empty_rounds=3`, `idle_sleep=30.0`) are the
 battle-tested values from FiniteTemperature.jl.
@@ -747,8 +755,9 @@ dependents", not a DAG.
 
 `affinity` is forwarded verbatim to every [`run!`](@ref) call.
 
-Returns `(; ran, rounds, done, stopped_by, prerequisite)`. `ran` is `false` exactly when a
-prerequisite blocked the stage.
+Returns `(; ran, rounds, done, busy, stopped_by, prerequisite)`. `busy` is how many keys the last
+round found held by a sibling, so a caller can tell "everything is done" from "someone else still
+has work out". `ran` is `false` exactly when a prerequisite blocked the stage.
 """
 function run_loop!(
     work_fn::Function,
@@ -765,13 +774,24 @@ function run_loop!(
     if prerequisite !== nothing
         pre = run_prerequisite!(prerequisite; opts=opts, load=load, poll=idle_sleep)
         pre.complete || return (;
-            ran=false, rounds=0, done=0, stopped_by=pre.stopped_by, prerequisite=pre
+            ran=false,
+            rounds=0,
+            done=0,
+            busy=0,
+            stopped_by=pre.stopped_by,
+            prerequisite=pre,
         )
     end
 
     empty_count = 0
     rounds = 0
     n_done = 0
+    n_busy = 0
+    busy_waited = 0.0
+    # A lock is reclaimable once its heartbeat is `stale_after` old, so waiting that long is what
+    # separates "a sibling is working on it" from "the holder is gone". The margin covers the round
+    # that has to follow the expiry to act on it.
+    busy_budget = opts.stale_after + 2 * idle_sleep
     while true
         if _is_stopped(opts)
             break
@@ -779,8 +799,20 @@ function run_loop!(
         rounds += 1
         result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
         n_done += result.done
+        n_busy = result.busy
         if result.done > 0
             empty_count = 0
+            busy_waited = 0.0
+            continue
+        end
+        # A round that completed nothing but found keys held by a SIBLING is not an empty round:
+        # either that sibling finishes them, or it is dead and `acquire_running!` reclaims them
+        # once its heartbeat passes `stale_after`. Counting it as empty is what made a follow-on
+        # job return after `max_empty_rounds * idle_sleep` while the locks stayed held for
+        # `stale_after`, leaving the campaign short and saying nothing.
+        if result.busy > 0 && busy_waited < busy_budget
+            busy_waited += idle_sleep
+            sleep(idle_sleep)
             continue
         end
         empty_count += 1
@@ -793,6 +825,7 @@ function run_loop!(
         ran=true,
         rounds=rounds,
         done=n_done,
+        busy=n_busy,
         stopped_by=_stop_reason(opts),
         prerequisite=pre,
     )
