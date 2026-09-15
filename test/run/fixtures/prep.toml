@@ -1,0 +1,11 @@
+# The projection of study.toml's key space onto N alone: the axis the shared setup depends on.
+[study]
+project_name  = "pm_test"
+total_samples = 1
+outdir        = "out"
+
+[datavault]
+path_keys = ["N"]
+
+[[paramsets]]
+N = [4, 8]

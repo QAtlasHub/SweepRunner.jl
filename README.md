@@ -52,6 +52,12 @@ and the store from [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl).
   depending on environment.
 - **Pure work functions** — your physics is a plain
   `(DataKey) -> Dict`, IO/locking/logging live in the runtime.
+- **Prerequisite stages** — `run!` locks the KEY, so work SHARED between keys
+  has nowhere to live but inside `work_fn`, where every worker that wants a
+  setup not yet on disk builds it itself. A `Prerequisite` makes that setup its
+  own key space, run to completion first, with the same locking, resume and
+  provenance. Measured, 8 concurrent processes over 16 keys sharing 2 setups:
+  **16 builds inside `work_fn`, 2 with a prerequisite.**
 
 ## Quick start
 
@@ -75,6 +81,31 @@ SweepRunner.run!(work_fn, vault, keys)
 
 Re-running the same script after completion: `:skip_complete` is logged and
 the process exits within milliseconds regardless of `length(keys)`.
+
+### Shared setup
+
+When many keys need one expensive thing, give that thing its own key space:
+
+```julia
+using ParamIO, DataVault, SweepRunner
+
+spec  = ParamIO.load("config.toml")
+main  = DataVault.Vault("config.toml"; run="dependent")
+prep  = DataVault.Vault("config.toml"; run="setup")
+
+# The axes the setup actually depends on. ParamIO.project derives this from the
+# same spec, so the two key spaces cannot drift apart by hand.
+derived = ParamIO.expand(ParamIO.project(spec, ["system.L", "model.lambda", "thermal.beta"]))
+
+run_loop!(work_fn, main, ParamIO.expand(spec);
+          prerequisite = Prerequisite(prep_fn, prep, derived),
+          opts = RunOpts(deadline = time() + 25*60))
+```
+
+The prerequisite is a **barrier**: `run_loop!` does not start the dependent stage until every setup
+key is done, and if one cannot be built it does not start it at all. The dependency is one level
+deep and resolved inside `work_fn`, so this is "all of the setup, then all of the dependents", not
+a DAG.
 
 ## Phase chaining without `Stage` / `DAG`
 

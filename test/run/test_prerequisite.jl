@@ -1,0 +1,208 @@
+# Prerequisite (#46): shared setup as its own stage instead of inside work_fn.
+
+using SweepRunner, Test, DataVault, ParamIO, JSON3
+
+const _PRE_MAIN = joinpath(@__DIR__, "fixtures", "study.toml")
+const _PRE_PREP = joinpath(@__DIR__, "fixtures", "prep.toml")
+
+function with_both(f)
+    outdir = mktempdir()
+    try
+        main = DataVault.Vault(_PRE_MAIN; run="dependent", outdir=outdir)
+        prep = DataVault.Vault(_PRE_PREP; run="setup", outdir=outdir)
+        f(main, prep, outdir)
+    finally
+        rm(outdir; recursive=true, force=true)
+    end
+end
+
+# One line per build, appended. The point of the issue is HOW MANY times a setup gets built.
+_log_build!(path, what) = open(path, "a") do io
+    return println(io, what)
+end
+_n_builds(path, what) = isfile(path) ? count(==(what), readlines(path)) : 0
+
+setup_of(k) = ParamIO.param(k, "N")
+
+@testset "prerequisite: the setup stage finishes before the dependent stage starts" begin
+    with_both() do main, prep, outdir
+        order = joinpath(outdir, "order.txt")
+        prep_fn =
+            k -> (_log_build!(order, "prep"); Dict{String,Any}("state" => setup_of(k)))
+        work_fn = k -> (_log_build!(order, "work"); Dict{String,Any}("x" => 1))
+
+        pkeys = DataVault.keys(prep)
+        r = run_loop!(
+            work_fn,
+            main,
+            DataVault.keys(main);
+            prerequisite=Prerequisite(prep_fn, prep, pkeys),
+            opts=RunOpts(workers=:sequential),
+            idle_sleep=0.0,
+        )
+
+        @test r.ran
+        @test r.prerequisite.complete
+        lines = readlines(order)
+        @test count(==("prep"), lines) == length(pkeys)
+        @test count(==("work"), lines) == length(DataVault.keys(main))
+        # Every prep precedes every work: the barrier, stated as an ordering.
+        @test findlast(==("prep"), lines) < findfirst(==("work"), lines)
+    end
+end
+
+@testset "prerequisite: the setup is built once per setup key, not once per dependent key" begin
+    with_both() do main, prep, outdir
+        builds = joinpath(outdir, "builds.txt")
+        prep_fn = k -> (_log_build!(builds, "N$(setup_of(k))"); Dict{String,Any}("s" => 1))
+        work_fn = k -> Dict{String,Any}("x" => 1)
+
+        run_loop!(
+            work_fn,
+            main,
+            DataVault.keys(main);
+            prerequisite=Prerequisite(prep_fn, prep, DataVault.keys(prep)),
+            opts=RunOpts(workers=:sequential),
+            idle_sleep=0.0,
+        )
+
+        # 4 dependent keys fall onto 2 setups.
+        @test length(DataVault.keys(main)) == 4
+        @test _n_builds(builds, "N4") == 1
+        @test _n_builds(builds, "N8") == 1
+    end
+end
+
+@testset "prerequisite: without one, the same setup IS rebuilt per dependent key" begin
+    # The control. The check-then-build idiom this replaces, in one process: work_fn builds the
+    # setup when it is not on disk. Without the prerequisite stage the fixture MUST duplicate, or
+    # the testset above passes for having nothing to prevent.
+    with_both() do main, prep, outdir
+        builds = joinpath(outdir, "builds.txt")
+        cache = joinpath(outdir, "cache")
+        mkpath(cache)
+        function work_fn(k)
+            f = joinpath(cache, "N$(setup_of(k)).state")
+            if !isfile(f)                       # check-then-build
+                _log_build!(builds, "N$(setup_of(k))")
+                write(f, "1")
+            end
+            return Dict{String,Any}("x" => 1)
+        end
+
+        # Two masters interleaved the way separate processes are: each sees the cache as it was
+        # before the other wrote, which is the race that made 31 workers produce 5 states.
+        for k in DataVault.keys(main)
+            rm(cache; recursive=true, force=true)
+            mkpath(cache)
+            work_fn(k)
+        end
+        @test _n_builds(builds, "N4") == 2       # duplicated: 2 dependent keys per setup
+        @test _n_builds(builds, "N8") == 2
+    end
+end
+
+@testset "prerequisite: a setup that cannot be built blocks the dependent stage" begin
+    with_both() do main, prep, outdir
+        ran = Ref(0)
+        r = run_loop!(
+            k -> (ran[] += 1; Dict{String,Any}("x" => 1)),
+            main,
+            DataVault.keys(main);
+            prerequisite=Prerequisite(
+                k -> error("cannot cool"), prep, DataVault.keys(prep)
+            ),
+            opts=RunOpts(workers=:sequential, max_attempts=1),
+            idle_sleep=0.0,
+        )
+        @test !r.ran
+        @test ran[] == 0
+        @test !r.prerequisite.complete
+        @test r.prerequisite.remaining == length(DataVault.keys(prep))
+    end
+end
+
+@testset "prerequisite: a live sibling's lock is WAITED for, not treated as failure" begin
+    # run_loop! would stop after max_empty_rounds here; a barrier must not. The sibling is a fresh
+    # `.running` on one setup key that nothing will ever release, so the wait is ended by the
+    # deadline, which is what proves it waited rather than returned.
+    with_both() do main, prep, outdir
+        pkeys = DataVault.keys(prep)
+        DataVault.mark_running!(prep, pkeys[1])        # a sibling holds it
+        built = Ref(0)
+
+        t0 = time()
+        pre = SweepRunner.run_prerequisite!(
+            Prerequisite(
+                k -> (built[] += 1; Dict{String,Any}("s" => 1)),
+                prep,
+                pkeys;
+                opts=RunOpts(workers=:sequential, stale_after=600.0, deadline=time() + 1.5),
+            );
+            poll=0.2,
+        )
+        elapsed = time() - t0
+
+        @test !pre.complete
+        @test pre.stopped_by === :deadline
+        @test pre.waited >= 1                  # it slept instead of giving up
+        @test elapsed >= 1.0
+        @test built[] == length(pkeys) - 1     # the other setup key was still built
+        @test pre.remaining == 1
+    end
+end
+
+@testset "prerequisite: opts on the Prerequisite override the dependent stage's" begin
+    with_both() do main, prep, outdir
+        p = Prerequisite(
+            k -> Dict{String,Any}("s" => 1),
+            prep,
+            DataVault.keys(prep);
+            opts=RunOpts(workers=:sequential, stale_after=1234.0),
+        )
+        @test p.opts.stale_after == 1234.0
+        @test Prerequisite(k -> Dict{String,Any}(), prep, DataVault.keys(prep)).opts ===
+            nothing
+
+        pre = SweepRunner.run_prerequisite!(p; opts=RunOpts(workers=:sequential), poll=0.0)
+        @test pre.complete
+        @test pre.done == length(DataVault.keys(prep))
+    end
+end
+
+@testset "prerequisite: an already-complete setup is a no-op, and resume works" begin
+    with_both() do main, prep, outdir
+        pkeys = DataVault.keys(prep)
+        n = Ref(0)
+        p() = Prerequisite(
+            k -> (n[] += 1; Dict{String,Any}("s" => 1)),
+            prep,
+            pkeys;
+            opts=RunOpts(workers=:sequential),
+        )
+        first = SweepRunner.run_prerequisite!(p(); poll=0.0)
+        @test first.complete && first.done == length(pkeys)
+        @test n[] == length(pkeys)
+
+        second = SweepRunner.run_prerequisite!(p(); poll=0.0)
+        @test second.complete
+        @test second.done == 0                 # nothing rebuilt
+        @test n[] == length(pkeys)
+    end
+end
+
+@testset "prerequisite: run_loop! without one is unchanged, and now reports" begin
+    with_both() do main, prep, outdir
+        r = run_loop!(
+            k -> Dict{String,Any}("x" => 1),
+            main,
+            DataVault.keys(main);
+            opts=RunOpts(workers=:sequential),
+            idle_sleep=0.0,
+        )
+        @test r.ran
+        @test r.prerequisite === nothing
+        @test r.done == length(DataVault.keys(main))
+        @test r.stopped_by === nothing
+    end
+end

@@ -581,8 +581,8 @@ function _short_err(e)::String
 end
 
 """
-    run_loop!(work_fn, vault, keys; opts=RunOpts(),
-              max_empty_rounds=3, idle_sleep=30.0, load=nothing)
+    run_loop!(work_fn, vault, keys; opts=RunOpts(), max_empty_rounds=3,
+              idle_sleep=30.0, load=nothing, prerequisite=nothing) -> NamedTuple
 
 Work-stealing loop that repeatedly calls [`run!`](@ref) until there is no
 more work to do. This is the infra equivalent of FiniteTemperature.jl's
@@ -590,13 +590,39 @@ more work to do. This is the infra equivalent of FiniteTemperature.jl's
 
 The loop exits when:
 - `max_empty_rounds` consecutive rounds produce zero new completions, or
-- `opts.stop_flag` is raised (graceful shutdown).
+- `opts.stop_flag` is raised, or `opts.deadline` has passed.
 
 Default parameters (`max_empty_rounds=3`, `idle_sleep=30.0`) are the
 battle-tested values from FiniteTemperature.jl.
 
 `load` is forwarded verbatim to every [`run!`](@ref) call (see its docstring) — name the work
 module(s) the workers need and the loop handles the per-round broadcast.
+
+# Prerequisite
+
+`run!` locks the KEY, so no two workers compute the same key. Work shared BETWEEN keys has to live
+inside `work_fn`, and there it has no protection at all: every worker that wants a setup not yet on
+disk builds it itself.
+
+Pass a [`Prerequisite`](@ref) and that setup becomes its own key space, run to completion by
+[`run_prerequisite!`](@ref) before the dependent stage starts. It then gets the same locking,
+resume and provenance as any other stage, and its cost is recorded in its own payload instead of
+landing on whichever dependent key happened to run first.
+
+    run_loop!(work_fn, vault, keys;
+              prerequisite = Prerequisite(prep_fn, prep_vault, derived_keys),
+              opts = opts)
+
+If the prerequisite does not complete, the dependent stage does NOT start, and the returned
+`prerequisite` field says why. Running it anyway would spend the allocation on keys whose setup is
+known to be missing.
+
+**SweepRunner does not know which dependent key needs which prerequisite key.** The dependency is
+one level deep and resolved inside `work_fn`, so this is "all of the prerequisite, then all of the
+dependents", not a DAG.
+
+Returns `(; ran, rounds, done, stopped_by, prerequisite)`. `ran` is `false` exactly when a
+prerequisite blocked the stage.
 """
 function run_loop!(
     work_fn::Function,
@@ -606,13 +632,26 @@ function run_loop!(
     max_empty_rounds::Int=3,
     idle_sleep::Float64=30.0,
     load=nothing,
+    prerequisite=nothing,
 )
+    pre = nothing
+    if prerequisite !== nothing
+        pre = run_prerequisite!(prerequisite; opts=opts, load=load, poll=idle_sleep)
+        pre.complete || return (;
+            ran=false, rounds=0, done=0, stopped_by=pre.stopped_by, prerequisite=pre
+        )
+    end
+
     empty_count = 0
+    rounds = 0
+    n_done = 0
     while true
         if _is_stopped(opts)
             break
         end
+        rounds += 1
         result = run!(work_fn, vault, keys; opts=opts, load=load)
+        n_done += result.done
         if result.done > 0
             empty_count = 0
             continue
@@ -623,7 +662,13 @@ function run_loop!(
         end
         sleep(idle_sleep)
     end
-    return nothing
+    return (;
+        ran=true,
+        rounds=rounds,
+        done=n_done,
+        stopped_by=_stop_reason(opts),
+        prerequisite=pre,
+    )
 end
 
 export RunOpts, run!, run_loop!, manifest_root, load_manifest

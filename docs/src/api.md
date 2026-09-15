@@ -49,6 +49,13 @@ SweepRunner.run!
 SweepRunner.run_loop!
 ```
 
+## Prerequisite
+
+```@docs
+SweepRunner.Prerequisite
+SweepRunner.run_prerequisite!
+```
+
 ## Preflight
 
 ```@docs
