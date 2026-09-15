@@ -49,6 +49,7 @@ stay within that guarantee.
 | `retry`         | another attempt will follow                                       |
 | `gave_up`       | all `max_attempts` attempts exhausted                             |
 | `skip_complete` | full-done early exit (manifest had every key)                     |
+| `worker_lost`   | every worker died with keys pending; the key was not attempted    |
 
 `:key_start` and `:lock_busy` are emitted at `:debug` level and are suppressed
 unless the `EventLog` is created with `min_level=:debug` (see `RunOpts.log_level`);

@@ -52,6 +52,11 @@ and the store from [DataVault.jl](https://github.com/QAtlasHub/DataVault.jl).
   depending on environment.
 - **Pure work functions** — your physics is a plain
   `(DataKey) -> Dict`, IO/locking/logging live in the runtime.
+- **Worker affinity** — `run!(...; affinity = k -> ...)` makes a free worker
+  prefer a key whose group it has already handled, so worker-local memoisation
+  of a shared setup is hit instead of reloaded. A preference, never a partition:
+  no worker idles while a key is pending. Measured, 24 keys over 2 groups on 8
+  workers: **8 group changes without it, 0 with.**
 - **Prerequisite stages** — `run!` locks the KEY, so work SHARED between keys
   has nowhere to live but inside `work_fn`, where every worker that wants a
   setup not yet on disk builds it itself. A `Prerequisite` makes that setup its
@@ -99,8 +104,12 @@ derived = ParamIO.expand(ParamIO.project(spec, ["system.L", "model.lambda", "the
 
 run_loop!(work_fn, main, ParamIO.expand(spec);
           prerequisite = Prerequisite(prep_fn, prep, derived),
-          opts = RunOpts(deadline = time() + 25*60))
+          affinity     = k -> ParamIO.param(k, "system.L"),
+          opts         = RunOpts(deadline = time() + 25*60))
 ```
+
+`prerequisite` removes the duplicated *build*; `affinity` removes the repeated *load* of what it
+built. The second only matters once the first is in place.
 
 The prerequisite is a **barrier**: `run_loop!` does not start the dependent stage until every setup
 key is done, and if one cannot be built it does not start it at all. The dependency is one level

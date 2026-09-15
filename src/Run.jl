@@ -185,6 +185,21 @@ Early skip (todo 10): on startup a stage-level Manifest is loaded. Keys
 already in the manifest are skipped — when all keys are done, the second
 run-through takes O(1) filesystem operations regardless of `length(keys)`.
 
+# Affinity
+
+`affinity` is `key -> value`, and turns the fan-out from "any free worker takes the next key" into
+"a free worker PREFERS a key whose `affinity` value it has already handled". Pass it when `work_fn`
+memoises something per group in worker-local state, so a worker that stays on a group pays the load
+once instead of once per key.
+
+    run!(work_fn, vault, keys; affinity = k -> param(k, "system.L"))
+
+A preference, not a partition: a worker is never idle while a key is pending, so a 200-key group
+does not serialise onto the worker that opened it. When a worker has nothing from its own groups
+left it takes from the group with the most work outstanding, which spreads workers over groups.
+
+Only affects the `pmap` path; the sequential path already visits keys in order.
+
 Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
 `:flag`, `:deadline`, or `nothing`, so a short stage is attributable without re-reading the clock.
 The full-done early exit returns the same field set rather than a shorter one.
@@ -225,6 +240,7 @@ function run!(
     keys::AbstractVector{DataKey};
     opts::RunOpts=RunOpts(),
     load=nothing,
+    affinity=nothing,
 )
     stage = Symbol(vault.run)
     log_name = "events_$(gethostname())_$(getpid()).jsonl"
@@ -262,7 +278,11 @@ function run!(
         _ensure_worker_modules(
             vcat([:ParamIO, :DataVault, :SweepRunner], _worker_module_names(load))
         )
-        _run_pmap!(work_fn, vault, todo, stage, log, opts)
+        if affinity === nothing
+            _run_pmap!(work_fn, vault, todo, stage, log, opts)
+        else
+            _run_affinity!(work_fn, vault, todo, stage, log, opts, affinity)
+        end
     else
         _run_sequential!(work_fn, vault, todo, stage, log, opts)
     end
@@ -516,6 +536,110 @@ function _run_pmap!(
 end
 
 """
+    _run_affinity!(work_fn, vault, todo, stage, log, opts, affinity) -> Vector{Tuple{DataKey,Symbol}}
+
+[`_run_pmap!`](@ref) with a PREFERENCE for keys whose `affinity` value the worker has already
+handled. A free worker takes a pending key from its most recently used group if one is left, and
+otherwise from the group with the most work outstanding, which spreads workers over groups instead
+of piling them onto one.
+
+A preference, never a partition. A worker is never idle while a key is pending, so a 200-key group
+does not serialise onto the worker that opened it.
+
+`pmap` is not used here because it hands out work itself. Its `ProcessExitedException` re-dispatch
+is reproduced: a key whose worker died goes back on the queue and the worker is dropped.
+"""
+function _run_affinity!(
+    work_fn::Function,
+    vault::Vault,
+    todo::AbstractVector{DataKey},
+    stage::Symbol,
+    log::EventLog,
+    opts::RunOpts,
+    affinity::Function,
+)
+    groups = Any[affinity(k) for k in todo]
+    by_group = Dict{Any,Vector{Int}}()
+    for (i, g) in enumerate(groups)
+        push!(get!(Vector{Int}, by_group, g), i)
+    end
+    # `pop!` takes from the end, so reverse to hand keys out in the caller's order. That order is
+    # load-bearing: a leading paramset is how a long acquisition is told which slice to close first.
+    for v in values(by_group)
+        reverse!(v)
+    end
+
+    out = Vector{Tuple{DataKey,Symbol}}(undef, length(todo))
+    # `Vector{Bool}`, not `BitVector`: adjacent bits share a word, so two tasks marking neighbouring
+    # indices would read-modify-write the same one.
+    filled = fill(false, length(todo))
+    q = ReentrantLock()
+    seen = Dict{Int,Vector{Any}}()
+
+    function _take!(pid::Int)
+        return lock(q) do
+            mine = get!(Vector{Any}, seen, pid)
+            for (j, g) in enumerate(mine)
+                v = get(by_group, g, nothing)
+                if v !== nothing && !isempty(v)
+                    j == 1 || (deleteat!(mine, j); pushfirst!(mine, g))
+                    return pop!(v)
+                end
+            end
+            best, bestn = nothing, 0
+            for (g, v) in by_group
+                length(v) > bestn && ((best, bestn) = (g, length(v)))
+            end
+            best === nothing && return nothing
+            pushfirst!(mine, best)
+            return pop!(by_group[best])
+        end
+    end
+
+    _give_back!(i::Int) = lock(q) do
+        return push!(get!(Vector{Int}, by_group, groups[i]), i)
+    end
+
+    @sync for pid in workers()
+        @async while true
+            i = _take!(pid)
+            i === nothing && break
+            key = todo[i]
+            res = try
+                remotecall_fetch(
+                    _run_one_with_lock!, pid, work_fn, vault, key, stage, log, opts
+                )
+            catch e
+                if e isa ProcessExitedException
+                    _give_back!(i)
+                    break
+                end
+                log_event(
+                    log,
+                    :error;
+                    stage=stage,
+                    key=canonical(key),
+                    attempt=0,
+                    err=_short_err(e),
+                )
+                (key, :error)
+            end
+            out[i] = res
+            filled[i] = true
+        end
+    end
+
+    # Every worker died while keys were still pending. Those keys were never attempted, so they are
+    # retriable rather than failed: `:lock_busy` is the outcome `run!` already counts that way.
+    for i in eachindex(todo)
+        filled[i] && continue
+        log_event(log, :worker_lost; stage=stage, key=canonical(todo[i]))
+        out[i] = (todo[i], :lock_busy)
+    end
+    return out
+end
+
+"""
     _run_one_with_retry!(work_fn, vault, key, kstr, stage, log, opts, lost) -> Symbol
 
 Execute `work_fn(key)` up to `opts.max_attempts` times. Returns:
@@ -621,6 +745,8 @@ known to be missing.
 one level deep and resolved inside `work_fn`, so this is "all of the prerequisite, then all of the
 dependents", not a DAG.
 
+`affinity` is forwarded verbatim to every [`run!`](@ref) call.
+
 Returns `(; ran, rounds, done, stopped_by, prerequisite)`. `ran` is `false` exactly when a
 prerequisite blocked the stage.
 """
@@ -633,6 +759,7 @@ function run_loop!(
     idle_sleep::Float64=30.0,
     load=nothing,
     prerequisite=nothing,
+    affinity=nothing,
 )
     pre = nothing
     if prerequisite !== nothing
@@ -650,7 +777,7 @@ function run_loop!(
             break
         end
         rounds += 1
-        result = run!(work_fn, vault, keys; opts=opts, load=load)
+        result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
         n_done += result.done
         if result.done > 0
             empty_count = 0
