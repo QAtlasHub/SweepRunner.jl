@@ -26,9 +26,9 @@ stay within that guarantee.
 
 - `path::String` — target JSONL file. Parent directory is created lazily on
   first [`log_event`](@ref).
-- `lock::ReentrantLock` — protects appends from same-process races. SHARED between every
-  `EventLog` with the same path, because `run!` builds one per call and concurrent masters in one
-  process therefore hold several objects pointing at one file.
+- `lock::ReentrantLock` — the per-path lock at construction time. [`log_event`](@ref) resolves the
+  lock from `path` rather than reading this field, so an `EventLog` that arrived on a worker by
+  deserialization (which skips the constructor) still serialises against its siblings there.
 
 # Event kinds used by `run!`
 
@@ -135,7 +135,10 @@ function log_event(log::EventLog, kind::Symbol; level::Symbol=:info, kwargs...)
     # Build the full line with newline so a single `write` is one atomic
     # append on POSIX (given `O_APPEND` and size < PIPE_BUF).
     line = string(JSON3.write(rec), '\n')
-    lock(log.lock) do
+    # Resolved from the PATH, not taken from `log.lock`. `run!` serialises the `EventLog` to every
+    # worker, and deserialization rebuilds the struct without running the constructor, so the field
+    # that arrives on a worker is a private lock that serialises nothing against its siblings.
+    lock(_path_lock(log.path)) do
         mkpath(dirname(log.path))
         fd = Base.Filesystem.open(
             log.path,

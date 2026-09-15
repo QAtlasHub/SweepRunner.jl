@@ -1,7 +1,7 @@
 # Several EventLog objects on ONE path: `run!` builds a fresh one per call, so concurrent masters
 # in a single process hold several objects pointing at the same file.
 
-using SweepRunner, Test, JSON3
+using SweepRunner, Test, JSON3, Serialization
 
 @testset "EventLog: objects on one path share a lock" begin
     dir = mktempdir()
@@ -13,6 +13,36 @@ using SweepRunner, Test, JSON3
         @test EventLog(joinpath(dir, "other.jsonl")).lock !== a.lock
         # The path is normalised, so a relative spelling of the same file still shares.
         @test EventLog(relpath(p, pwd())).lock === a.lock
+    finally
+        rm(dir; recursive=true, force=true)
+    end
+end
+
+@testset "EventLog: a deserialized log serialises against its siblings" begin
+    # `run!` sends the EventLog to every worker, and deserialization skips the constructor, so the
+    # `lock` field that arrives there is private. log_event resolves the lock from the path.
+    dir = mktempdir()
+    try
+        p = joinpath(dir, "e.jsonl")
+        a = EventLog(p)
+        io = IOBuffer()
+        serialize(io, a)
+        seekstart(io)
+        b = deserialize(io)
+        @test b.lock !== a.lock                    # the field really does not survive
+
+        n = 200
+        Threads.@sync begin
+            Threads.@spawn for j in 1:n
+                log_event(a, :key_acquired; key="a$(j)_" * "x"^40, acq="ok")
+            end
+            Threads.@spawn for j in 1:n
+                log_event(b, :key_acquired; key="b$(j)_" * "x"^40, acq="ok")
+            end
+        end
+        lines = readlines(p)
+        @test length(lines) == 2 * n
+        @test length([JSON3.read(l) for l in lines]) == 2 * n
     finally
         rm(dir; recursive=true, force=true)
     end
