@@ -230,3 +230,39 @@ end
         @test built[] == length(keys)
     end
 end
+
+@testset "prerequisite: the documented project(...) recipe reproduces the setup key space" begin
+    # `Prerequisite`'s docstring says to build `keys` by projecting the dependent key space onto
+    # the axes the setup depends on, "so the two spaces cannot drift apart by hand". Every other
+    # test in this file passes `DataVault.keys(prep)` — the hand-written projection that IS
+    # prep.toml — so the recipe the docs recommend was never once executed.
+    with_both() do main, prep, outdir
+        projected = ParamIO.expand(ParamIO.project(main.spec, ["N"]; total_samples=1))
+        @test Set(projected) == Set(DataVault.keys(prep))   # the hand-written file is the oracle
+
+        builds = joinpath(outdir, "builds.txt")
+        prep_fn = k -> (_log_build!(builds, "N$(setup_of(k))"); Dict{String,Any}("s" => 1))
+        r = run_loop!(
+            k -> Dict{String,Any}("x" => 1),
+            main,
+            DataVault.keys(main);
+            prerequisite=Prerequisite(prep_fn, prep, projected),
+            opts=RunOpts(workers=:sequential),
+            idle_sleep=0.0,
+        )
+        @test r.ran
+        @test r.prerequisite.complete
+        @test _n_builds(builds, "N4") == 1                  # once per distinct N ...
+        @test _n_builds(builds, "N8") == 1
+        @test length(DataVault.keys(main)) == 4             # ... not once per dependent key
+
+        # Control: the projection tracks a sweep that grows and the hand-written file does not,
+        # which is the drift the recipe exists to remove. Without it the equality above would also
+        # hold for a projection that ignored the spec entirely.
+        grown = joinpath(outdir, "grown.toml")
+        write(grown, replace(read(_PRE_MAIN, String), "N = [4, 8]" => "N = [4, 8, 12]"))
+        gproj = ParamIO.expand(ParamIO.project(ParamIO.load(grown), ["N"]; total_samples=1))
+        @test length(gproj) == 3
+        @test Set(gproj) != Set(DataVault.keys(prep))
+    end
+end
