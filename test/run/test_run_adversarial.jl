@@ -55,10 +55,8 @@ allk_a(v) = ParamIO.expand(v.spec)
         # At least one key ran before stop kicked in, at least one was skipped
         @test result.done >= 1
         @test result.done < length(keys)  # stop really cut us short
-        # Remaining keys are either counted as :stop (if we reached their
-        # dispatch) or just dropped from the todo list (sequential loop
-        # break). Either way, fewer done+stop than length means some were
-        # silently un-processed.
+        # Every remaining key is attributed on both dispatcher paths, so `done + stop` accounts
+        # for the whole list.
         @test counter[] == result.done  # work_fn only called for done keys
         return isfile(stop) && rm(stop; force=true)
     end

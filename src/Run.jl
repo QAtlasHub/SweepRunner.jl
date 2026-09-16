@@ -132,7 +132,19 @@ function _stop_reason(opts::RunOpts)::Union{Symbol,Nothing}
     return nothing
 end
 
-_is_stopped(opts::RunOpts)::Bool = _stop_reason(opts) !== nothing
+# The per-key outcome vocabulary names the same two reasons `_stop_reason` does, for a
+# `(key, outcome)` tuple that sits alongside `:ok` / `:error`. Written once, and loudly: a third
+# reason added above must fail here rather than be silently relabelled as a deadline.
+function _stop_outcome(reason::Symbol)::Symbol
+    reason === :flag && return :stop_flag
+    reason === :deadline && return :stop_deadline
+    return throw(ArgumentError("no per-key outcome for stop reason $(repr(reason))"))
+end
+
+# How many times a key whose worker DIED is handed to another one. Both dispatchers bound this,
+# `_run_pmap!` through `pmap`'s `retry_delays` and `_run_affinity!` by counting, and they have to
+# agree: the same bound expressed twice through unrelated mechanisms is how they drift apart.
+const _WORKER_DEATH_REDISPATCHES = 2
 
 # As of v0.3 the per-key lock lives ENTIRELY in DataVault's `.running`
 # sentinel — acquired atomically via `DataVault.acquire_running!`
@@ -201,7 +213,8 @@ left it takes from the group with the most work outstanding, which spreads worke
 Only affects the `pmap` path; the sequential path already visits keys in order.
 
 Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
-`:flag`, `:deadline`, or `nothing`, so a short stage is attributable without re-reading the clock.
+`:flag`, `:deadline`, or `nothing`: a stage that finished every key reports `nothing` even if the
+deadline passed while its last key ran, since no key was ever held back by it.
 The full-done early exit returns the same field set rather than a shorter one.
 
 Contract:
@@ -293,6 +306,7 @@ function run!(
     n_busy = 0
     n_gave_up = 0
     n_stop = 0
+    stop_seen = nothing
     for (key, outcome) in outcomes
         if outcome === :lock_busy
             n_busy += 1
@@ -301,8 +315,12 @@ function run!(
         elseif outcome === :ok
             add_complete!(m, key)
             n_done += 1
-        elseif outcome === :stop
+        elseif outcome === :stop_flag
             n_stop += 1
+            stop_seen = :flag                 # outranks :deadline, as `_stop_reason` does
+        elseif outcome === :stop_deadline
+            n_stop += 1
+            stop_seen === nothing && (stop_seen = :deadline)
         elseif outcome === :gave_up
             n_gave_up += 1
             n_err += 1
@@ -315,7 +333,9 @@ function run!(
     # concurrent masters don't overwrite each other's completed keys.
     merge_and_save_manifest!(m)
 
-    stopped_by = _stop_reason(opts)
+    # From what the round actually did, so a stage that finished every key is not attributed to a
+    # deadline that passed while the last one ran.
+    stopped_by = stop_seen
     log_event(
         log,
         :stage_done;
@@ -342,6 +362,32 @@ function run!(
     )
 end
 
+# Clear a `.running` whose holder is provably gone, so the key is retriable NOW rather than in
+# `stale_after`. Returns whether anything was cleared.
+#
+# Only `:dead` acts. `:unknown` is the common answer (a holder on another host with no Slurm id)
+# and leaves the timeout to decide, exactly as before.
+function _reap_if_dead!(vault::Vault, key::DataKey, stage::Symbol, log::EventLog)::Bool
+    # An `isfile` first: `running_owner` opens and reads, and the uncontended case is every key.
+    DataVault.is_running(vault, key) || return false
+    # Reaping is an OPTIMISATION over `stale_after`, so nothing in it may be fatal. Without this,
+    # an unlink that fails (a read-only status directory, an NFS hiccup) escapes `run!` and takes
+    # every other key in the round with it, none of which was attempted.
+    try
+        owner = DataVault.running_owner(vault, key)
+        owner === nothing && return false      # unstamped: cannot be attributed, so cannot be judged
+        holder_liveness(owner) === :dead || return false
+        cleared = DataVault.clear_running!(vault, key, owner)
+        cleared &&
+            log_event(log, :lock_reaped; stage=stage, key=canonical(key), owner=owner)
+        return cleared
+    catch e
+        e isa InterruptException && rethrow()
+        log_event(log, :reap_failed; stage=stage, key=canonical(key), err=_short_err(e))
+        return false
+    end
+end
+
 """
     _run_one_with_lock!(work_fn, vault, key, stage, log, opts) -> (DataKey, Symbol)
 
@@ -357,7 +403,8 @@ Outcome symbols:
 - `:ok`           — `work_fn` succeeded and `mark_done!` was called.
 - `:error`        — single-attempt failure (`opts.max_attempts == 1`).
 - `:gave_up`      — all `opts.max_attempts` attempts failed.
-- `:stop`         — stop flag detected before work started.
+- `:stop_flag` / `:stop_deadline`
+                  a stop condition held before work started, carrying which one.
 """
 function _run_one_with_lock!(
     work_fn::Function,
@@ -371,14 +418,20 @@ function _run_one_with_lock!(
 
     # Early exit if stop flag has been raised (checked by both sequential
     # and pmap paths, so each worker can bail independently).
-    if _is_stopped(opts)
-        return (key, :stop)
-    end
+    # The reason travels back WITH the outcome: a flag file can be removed and a deadline can pass
+    # before the outcome is read, so re-deriving it later can name something that did not stop this.
+    stop = _stop_reason(opts)
+    stop === nothing || return (key, _stop_outcome(stop))
+
+    # A lock whose holder can be SHOWN to be gone does not have to wait out `stale_after`. The
+    # clear is owner-checked, so it is a no-op if the holder changed since the question was asked.
+    _reap_if_dead!(vault, key, stage, log)
 
     # DataVault owns the lock file.  `acquire_running!` is atomic on
     # NFS via POSIX `link()`: concurrent masters see at most one
     # `:ok` / `:reclaimed`; the losers see `:busy`.
-    acq = DataVault.acquire_running!(vault, key; stale_after=opts.stale_after)
+    tok = owner_token()
+    acq = DataVault.acquire_running!(vault, key, tok; stale_after=opts.stale_after)
     if acq === :busy
         log_event(log, :lock_busy; level=:debug, stage=stage, key=kstr)
         return (key, :lock_busy)
@@ -393,7 +446,7 @@ function _run_one_with_lock!(
     # Re-check after acquisition: another master may have finished this
     # key between our manifest read and our acquire.
     if DataVault.is_done(vault, key)
-        DataVault.clear_running!(vault, key)
+        DataVault.clear_running!(vault, key, tok)
         return (key, :already_done)
     end
 
@@ -403,14 +456,12 @@ function _run_one_with_lock!(
     # the stop signal thread-safe; a short sleep tick keeps finally
     # cleanup responsive (the earlier fixed 60-s sleep would block the
     # whole shutdown until the next heartbeat tick).
-    # `lost[]` is raised by the heartbeat task if it observes that a sibling
-    # reclaimed our lock (we stalled past `stale_after`). `_run_one_with_retry!`
-    # checks it before `save!`, and the `finally` below skips `clear_running!`
-    # when lost, so we neither commit on top of nor delete the lock now owned by
-    # the reclaiming master. Detection is BEST-EFFORT: `refresh_running!` is
-    # existence-based, so a reclaim is reliably caught only via stale-reclaim or
-    # the brief window the lock file is absent. A fully race-free guarantee needs
-    # owner-stamped locks in DataVault (see PR notes).
+    # `lost[]` is raised by the heartbeat task if it observes that a sibling reclaimed our lock (we
+    # stalled past `stale_after`). `_run_one_with_retry!` checks it before `save!`, and the
+    # `finally` below skips `clear_running!` when lost, so we neither commit on top of nor delete
+    # the lock now owned by the reclaiming master. The refresh is OWNER-CHECKED (DataVault 0.8.1),
+    # so a reclaim that has already happened is seen on the next beat; the previous
+    # existence-based form returned `true` against the reclaimer's own file.
     hb_stop = Threads.Atomic{Bool}(false)
     lost = Threads.Atomic{Bool}(false)
     hb_task = Threads.@spawn begin
@@ -425,7 +476,7 @@ function _run_one_with_lock!(
                 # lock, e.g. NFS hiccup) both mean "treat as lost": stop
                 # heartbeating and signal it, rather than silently dying.
                 alive = try
-                    DataVault.refresh_running!(vault, key)
+                    DataVault.refresh_running!(vault, key, tok)
                 catch
                     false
                 end
@@ -452,7 +503,7 @@ function _run_one_with_lock!(
         # `clear_running!` is owner-blind (`isfile && rm`), so clearing it would
         # delete THEIR lock and re-open double-execution. On `:ok`, `mark_done!`
         # already removed our `.running`; `clear_running!` is otherwise idempotent.
-        lost[] || DataVault.clear_running!(vault, key)
+        lost[] || DataVault.clear_running!(vault, key, tok)
     end
 
     return (key, outcome)
@@ -470,8 +521,14 @@ function _run_sequential!(
     opts::RunOpts,
 )
     results = Vector{Tuple{DataKey,Symbol}}()
-    for key in todo
-        if _is_stopped(opts)
+    for (i, key) in enumerate(todo)
+        # The keys a stop drops are ATTRIBUTED, not silently absent, matching `_run_pmap!`, which
+        # hands every key to `_run_one_with_lock!` regardless. The result vector has one entry per
+        # `todo` key on either path.
+        stop = _stop_reason(opts)
+        if stop !== nothing
+            sym = _stop_outcome(stop)
+            append!(results, ((k, sym) for k in @view todo[i:end]))
             break
         end
         push!(results, _run_one_with_lock!(work_fn, vault, key, stage, log, opts))
@@ -511,7 +568,7 @@ function _run_pmap!(
         pool,
         todo;
         on_error=identity,
-        retry_delays=ExponentialBackOff(; n=2),
+        retry_delays=ExponentialBackOff(; n=_WORKER_DEATH_REDISPATCHES),
         retry_check=(s, e) -> (s, e isa ProcessExitedException),
     ) do key
         return _run_one_with_lock!(work_fn, vault, key, stage, log, opts)
@@ -596,8 +653,17 @@ function _run_affinity!(
         end
     end
 
-    _give_back!(i::Int) = lock(q) do
-        return push!(get!(Vector{Int}, by_group, groups[i]), i)
+    # `pmap` bounds its own `ProcessExitedException` re-dispatch with
+    # `retry_delays=ExponentialBackOff(; n=2)`; this dispatcher has to bound it too. Unbounded, a
+    # key that reliably kills whoever takes it is handed to worker after worker forever, and the
+    # faster a dead holder's lock is reclaimed the faster that cascade runs.
+    const_giveback_limit = _WORKER_DEATH_REDISPATCHES
+    givebacks = zeros(Int, length(todo))
+    _give_back!(i::Int)::Bool = lock(q) do
+        givebacks[i] += 1
+        givebacks[i] > const_giveback_limit && return false
+        push!(get!(Vector{Int}, by_group, groups[i]), i)
+        return true
     end
 
     @sync for pid in workers()
@@ -611,7 +677,20 @@ function _run_affinity!(
                 )
             catch e
                 if e isa ProcessExitedException
-                    _give_back!(i)
+                    # Requeued, or out of attempts: a key that has taken down `const_giveback_limit`
+                    # workers is reported rather than handed to the next one.
+                    if !_give_back!(i)
+                        log_event(
+                            log,
+                            :gave_up;
+                            stage=stage,
+                            key=canonical(key),
+                            attempts=const_giveback_limit + 1,
+                            err="worker exited on this key every time it was dispatched",
+                        )
+                        out[i] = (key, :error)
+                        filled[i] = true
+                    end
                     break
                 end
                 log_event(
@@ -713,8 +792,16 @@ more work to do. This is the infra equivalent of FiniteTemperature.jl's
 `_work_loop` driver.
 
 The loop exits when:
-- `max_empty_rounds` consecutive rounds produce zero new completions, or
+- `max_empty_rounds` consecutive rounds produce zero new completions AND leave nothing held by a
+  sibling, or
 - `opts.stop_flag` is raised, or `opts.deadline` has passed.
+
+A round that completes nothing but finds keys `:lock_busy` does NOT count toward
+`max_empty_rounds` until `opts.stale_after` has been waited out. Those keys are either being
+worked on by a live sibling, or held by one the wall clock killed, and `stale_after` is what
+separates the two: past it, `acquire_running!` reclaims the lock on the next attempt. Returning
+before then leaves the campaign short and reports nothing, because `max_empty_rounds *
+idle_sleep` (90 s by default) is an order of magnitude under `stale_after` (600 s).
 
 Default parameters (`max_empty_rounds=3`, `idle_sleep=30.0`) are the
 battle-tested values from FiniteTemperature.jl.
@@ -747,8 +834,9 @@ dependents", not a DAG.
 
 `affinity` is forwarded verbatim to every [`run!`](@ref) call.
 
-Returns `(; ran, rounds, done, stopped_by, prerequisite)`. `ran` is `false` exactly when a
-prerequisite blocked the stage.
+Returns `(; ran, rounds, done, busy, stopped_by, prerequisite)`. `busy` is how many keys the last
+round found held by a sibling, so a caller can tell "everything is done" from "someone else still
+has work out". `ran` is `false` exactly when a prerequisite blocked the stage.
 """
 function run_loop!(
     work_fn::Function,
@@ -765,26 +853,55 @@ function run_loop!(
     if prerequisite !== nothing
         pre = run_prerequisite!(prerequisite; opts=opts, load=load, poll=idle_sleep)
         pre.complete || return (;
-            ran=false, rounds=0, done=0, stopped_by=pre.stopped_by, prerequisite=pre
+            ran=false,
+            rounds=0,
+            done=0,
+            busy=0,
+            stopped_by=pre.stopped_by,
+            prerequisite=pre,
         )
     end
 
     empty_count = 0
     rounds = 0
     n_done = 0
+    n_busy = 0
+    busy_waited = 0.0
+    # A lock is reclaimable once its heartbeat is `stale_after` old, so waiting that long is what
+    # separates "a sibling is working on it" from "the holder is gone". The margin covers the round
+    # that has to follow the expiry to act on it.
+    busy_budget = opts.stale_after + 2 * idle_sleep
+    stopped = nothing
     while true
-        if _is_stopped(opts)
-            break
-        end
+        # Captured at the exit rather than re-read at return. A loop that exhausts
+        # `max_empty_rounds` sleeps `idle_sleep` between rounds and can cross the deadline while
+        # doing so, and a flag file removed in the meantime turns a real flag stop into `nothing`.
+        stopped = _stop_reason(opts)
+        stopped === nothing || break
         rounds += 1
         result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
         n_done += result.done
+        n_busy = result.busy
         if result.done > 0
             empty_count = 0
+            busy_waited = 0.0
+            continue
+        end
+        # A round that completed nothing but found keys held by a SIBLING is not an empty round:
+        # either that sibling finishes them, or it is dead and `acquire_running!` reclaims them
+        # once its heartbeat passes `stale_after`. Counting it as empty is what made a follow-on
+        # job return after `max_empty_rounds * idle_sleep` while the locks stayed held for
+        # `stale_after`, leaving the campaign short and saying nothing.
+        if result.busy > 0 && busy_waited < busy_budget
+            busy_waited += idle_sleep
+            sleep(idle_sleep)
             continue
         end
         empty_count += 1
         if empty_count >= max_empty_rounds
+            # The round itself may have been cut short rather than empty, and if so that is why
+            # there was nothing to do. Its own recorded reason, not a fresh clock read.
+            stopped = result.stopped_by
             break
         end
         sleep(idle_sleep)
@@ -793,7 +910,8 @@ function run_loop!(
         ran=true,
         rounds=rounds,
         done=n_done,
-        stopped_by=_stop_reason(opts),
+        busy=n_busy,
+        stopped_by=stopped,
         prerequisite=pre,
     )
 end

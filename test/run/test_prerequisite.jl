@@ -206,3 +206,143 @@ end
         @test r.stopped_by === nothing
     end
 end
+
+@testset "prerequisite: a stage may not loosen a bound the job set" begin
+    # A Prerequisite's own `opts` must not let the barrier outlive the allocation running it,
+    # whether by dropping the caller's deadline or by naming a more generous one of its own.
+    with_both() do main, prep, outdir
+        built = Ref(0)
+        work = k -> (built[] += 1; Dict{String,Any}("s" => 1))
+        keys = ParamIO.expand(prep.spec)
+
+        p = Prerequisite(work, prep, keys; opts=RunOpts(stale_after=3600.0))
+        r = run_prerequisite!(p; opts=RunOpts(deadline=time() - 1), poll=0.01)
+        @test r.complete == false
+        @test r.stopped_by === :deadline          # inherited from the caller
+        @test built[] == 0                        # and no setup was handed out
+        @test p.opts.stale_after == 3600.0        # while the field it WAS given still applies
+
+        # The TIGHTER one governs, not the explicit one: a Prerequisite built with a generous
+        # ceiling must not outlive a caller whose allocation is nearly over.
+        p2 = Prerequisite(work, prep, keys; opts=RunOpts(deadline=time() + 3600))
+        r2 = run_prerequisite!(p2; opts=RunOpts(deadline=time() - 1), poll=0.01)
+        @test r2.complete == false
+        @test r2.stopped_by === :deadline
+        @test built[] == 0
+
+        # Control the other way round: with no bound from the caller, the prerequisite's applies
+        # and the work runs, so `false` above is the tighter bound and not a blanket refusal.
+        r3 = run_prerequisite!(p2; opts=RunOpts(), poll=0.01)
+        @test r3.complete == true
+        @test built[] == length(keys)
+    end
+end
+
+@testset "prerequisite: the caller's stop flag is the one that governs" begin
+    # `RunOpts` resolves `stop_flag` from ENV["SWEEPRUNNER_STOP_FLAG"], so a Prerequisite built for
+    # `stale_after` alone can still carry a flag it never asked for. Treating "non-nothing" as
+    # "explicitly chosen" then let that ambient value outrank the flag the campaign was configured
+    # with, and an operator raising the one they know about would never be seen by the barrier.
+    with_both() do main, prep, outdir
+        built = Ref(0)
+        work = k -> (built[] += 1; Dict{String,Any}("s" => 1))
+        keys = ParamIO.expand(prep.spec)
+
+        ambient = joinpath(outdir, "AMBIENT_FLAG")
+        callers = joinpath(outdir, "CALLERS_FLAG")
+        touch(callers)                                # only the caller's flag is raised
+
+        p = withenv("SWEEPRUNNER_STOP_FLAG" => ambient) do
+            Prerequisite(work, prep, keys; opts=RunOpts(stale_after=3600.0))
+        end
+        @test p.opts.stop_flag == ambient             # carried without ever being asked for
+
+        r = run_prerequisite!(p; opts=RunOpts(stop_flag=callers), poll=0.01)
+        @test r.complete == false
+        @test r.stopped_by === :flag                  # the caller's flag was seen
+        @test built[] == 0
+
+        # Control: with the caller's flag cleared the barrier runs, so `:flag` above is that file
+        # and not a refusal for some other reason.
+        rm(callers; force=true)
+        r2 = run_prerequisite!(p; opts=RunOpts(stop_flag=callers), poll=0.01)
+        @test r2.complete == true
+        @test built[] == length(keys)
+    end
+end
+
+@testset "prerequisite: an already-satisfied barrier is complete, stop pending or not" begin
+    # `complete` was a hardcoded `false` the moment a stop was seen, computed on the same line as
+    # `remaining`. A setup built by an earlier run therefore reported `complete=false, remaining=0`,
+    # and `run_loop!` gates the dependent stage on exactly that field.
+    with_both() do main, prep, outdir
+        built = Ref(0)
+        work = k -> (built[] += 1; Dict{String,Any}("s" => 1))
+        keys = ParamIO.expand(prep.spec)
+
+        p = Prerequisite(work, prep, keys)
+        @test run_prerequisite!(p; opts=RunOpts(), poll=0.01).complete == true
+        @test built[] == length(keys)
+
+        r = run_prerequisite!(p; opts=RunOpts(deadline=time() - 1), poll=0.01)
+        @test r.remaining == 0
+        @test r.complete == true                      # and the two agree
+        @test built[] == length(keys)                 # nothing was rebuilt
+    end
+end
+
+@testset "prerequisite: a round cut short is not reported as a genuine dead end" begin
+    # The no-progress exit propagates the round's own reason. Without it, a deadline that cut the
+    # round short read as "nobody holds these and they will not appear", which is the answer that
+    # tells a resubmitter not to bother.
+    with_both() do main, prep, outdir
+        keys = ParamIO.expand(prep.spec)
+        @test length(keys) > 1
+        work = k -> (sleep(3.0); error("cannot build this setup"))
+        p = Prerequisite(work, prep, keys)
+        r = run_prerequisite!(
+            p;
+            opts=RunOpts(deadline=time() + 2.0, max_attempts=1, workers=:sequential),
+            poll=0.01,
+        )
+        @test r.complete == false
+        @test r.remaining > 0
+        @test r.stopped_by === :deadline              # cut short, not a dead end
+    end
+end
+
+@testset "prerequisite: the documented project(...) recipe reproduces the setup key space" begin
+    # `Prerequisite`'s docstring says to build `keys` by projecting the dependent key space onto
+    # the axes the setup depends on, "so the two spaces cannot drift apart by hand". Every other
+    # test in this file passes `DataVault.keys(prep)`, the hand-written projection that IS
+    # prep.toml, so the recipe the docs recommend was never once executed.
+    with_both() do main, prep, outdir
+        projected = ParamIO.expand(ParamIO.project(main.spec, ["N"]; total_samples=1))
+        @test Set(projected) == Set(DataVault.keys(prep))   # the hand-written file is the oracle
+
+        builds = joinpath(outdir, "builds.txt")
+        prep_fn = k -> (_log_build!(builds, "N$(setup_of(k))"); Dict{String,Any}("s" => 1))
+        r = run_loop!(
+            k -> Dict{String,Any}("x" => 1),
+            main,
+            DataVault.keys(main);
+            prerequisite=Prerequisite(prep_fn, prep, projected),
+            opts=RunOpts(workers=:sequential),
+            idle_sleep=0.0,
+        )
+        @test r.ran
+        @test r.prerequisite.complete
+        @test _n_builds(builds, "N4") == 1                  # once per distinct N ...
+        @test _n_builds(builds, "N8") == 1
+        @test length(DataVault.keys(main)) == 4             # ... not once per dependent key
+
+        # Control: the projection tracks a sweep that grows and the hand-written file does not,
+        # which is the drift the recipe exists to remove. Without it the equality above would also
+        # hold for a projection that ignored the spec entirely.
+        grown = joinpath(outdir, "grown.toml")
+        write(grown, replace(read(_PRE_MAIN, String), "N = [4, 8]" => "N = [4, 8, 12]"))
+        gproj = ParamIO.expand(ParamIO.project(ParamIO.load(grown), ["N"]; total_samples=1))
+        @test length(gproj) == 3
+        @test Set(gproj) != Set(DataVault.keys(prep))
+    end
+end
