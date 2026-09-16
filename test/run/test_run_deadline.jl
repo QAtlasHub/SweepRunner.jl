@@ -124,12 +124,14 @@ end
 @testset "deadline: an exhausted loop is not attributed to a deadline that passed meanwhile" begin
     # `stopped_by` was re-read from the clock when `run_loop!` returned, not recorded when
     # something was actually held back. A round that ran past the deadline and then gave up on
-    # `max_empty_rounds` therefore reported `:deadline` — a retryable answer — for a key that
+    # `max_empty_rounds` therefore reported `:deadline`, a retryable answer, for a key that
     # cannot be produced and will fail again on the next allocation.
     with_vault_d() do v, outdir
         keys = ParamIO.expand(v.spec)[1:1]        # one key, so the stop never holds one back
-        deadline = time() + 0.2
-        work = k -> (sleep(0.5); error("this key cannot be produced"))
+        # Margins an order of magnitude wider than the work they bound: CI here is self-hosted and
+        # shares the box, and the only failure mode is a false RED on good code.
+        deadline = time() + 2.0
+        work = k -> (sleep(3.0); error("this key cannot be produced"))
         r = run_loop!(
             work,
             v,
@@ -163,8 +165,8 @@ end
     with_vault_d() do v, outdir
         keys = ParamIO.expand(v.spec)
         @test length(keys) > 1
-        deadline = time() + 0.3
-        work = k -> (sleep(0.5); Dict{String,Any}("x" => 1))
+        deadline = time() + 2.0
+        work = k -> (sleep(3.0); Dict{String,Any}("x" => 1))
         r = run!(work, v, keys; opts=RunOpts(workers=:sequential, deadline=deadline))
         @test r.done == 1                         # the first key ran to completion
         @test r.stop == length(keys) - 1          # every later key is accounted for, not absent

@@ -132,7 +132,14 @@ function _stop_reason(opts::RunOpts)::Union{Symbol,Nothing}
     return nothing
 end
 
-_is_stopped(opts::RunOpts)::Bool = _stop_reason(opts) !== nothing
+# The per-key outcome vocabulary names the same two reasons `_stop_reason` does, for a
+# `(key, outcome)` tuple that sits alongside `:ok` / `:error`. Written once, and loudly: a third
+# reason added above must fail here rather than be silently relabelled as a deadline.
+function _stop_outcome(reason::Symbol)::Symbol
+    reason === :flag && return :stop_flag
+    reason === :deadline && return :stop_deadline
+    return throw(ArgumentError("no per-key outcome for stop reason $(repr(reason))"))
+end
 
 # How many times a key whose worker DIED is handed to another one. Both dispatchers bound this,
 # `_run_pmap!` through `pmap`'s `retry_delays` and `_run_affinity!` by counting, and they have to
@@ -206,9 +213,8 @@ left it takes from the group with the most work outstanding, which spreads worke
 Only affects the `pmap` path; the sequential path already visits keys in order.
 
 Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
-`:flag`, `:deadline`, or `nothing`, recorded when a key was actually held back rather than read
-off the clock at return, so a stage that finished everything reports `nothing` even if the deadline
-passed while its last key ran.
+`:flag`, `:deadline`, or `nothing`: a stage that finished every key reports `nothing` even if the
+deadline passed while its last key ran, since no key was ever held back by it.
 The full-done early exit returns the same field set rather than a shorter one.
 
 Contract:
@@ -398,7 +404,7 @@ Outcome symbols:
 - `:error`        — single-attempt failure (`opts.max_attempts == 1`).
 - `:gave_up`      — all `opts.max_attempts` attempts failed.
 - `:stop_flag` / `:stop_deadline`
-                  — a stop condition held before work started, carrying which one.
+                  a stop condition held before work started, carrying which one.
 """
 function _run_one_with_lock!(
     work_fn::Function,
@@ -412,13 +418,10 @@ function _run_one_with_lock!(
 
     # Early exit if stop flag has been raised (checked by both sequential
     # and pmap paths, so each worker can bail independently).
-    # The REASON travels back with the outcome. Asking again after the round answers "is a stop
-    # condition true now", which is a different question: a flag file can be removed and a deadline
-    # can pass in between, so the answer names something that did not stop this.
+    # The reason travels back WITH the outcome: a flag file can be removed and a deadline can pass
+    # before the outcome is read, so re-deriving it later can name something that did not stop this.
     stop = _stop_reason(opts)
-    if stop !== nothing
-        return (key, stop === :flag ? :stop_flag : :stop_deadline)
-    end
+    stop === nothing || return (key, _stop_outcome(stop))
 
     # A lock whose holder can be SHOWN to be gone does not have to wait out `stale_after`. The
     # clear is owner-checked, so it is a no-op if the holder changed since the question was asked.
@@ -519,13 +522,12 @@ function _run_sequential!(
 )
     results = Vector{Tuple{DataKey,Symbol}}()
     for (i, key) in enumerate(todo)
-        # The keys a stop drops are ATTRIBUTED, not silently absent. `pmap` hands every remaining
-        # key to `_run_one_with_lock!`, which returns a stop outcome for each, so leaving them out
-        # here made the same stop report a different `stop` count depending on the dispatcher — and
-        # made `stopped_by` unattributable on this path.
+        # The keys a stop drops are ATTRIBUTED, not silently absent, matching `_run_pmap!`, which
+        # hands every key to `_run_one_with_lock!` regardless. The result vector has one entry per
+        # `todo` key on either path.
         stop = _stop_reason(opts)
         if stop !== nothing
-            sym = stop === :flag ? :stop_flag : :stop_deadline
+            sym = _stop_outcome(stop)
             append!(results, ((k, sym) for k in @view todo[i:end]))
             break
         end
