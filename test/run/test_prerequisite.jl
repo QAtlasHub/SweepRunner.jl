@@ -206,3 +206,27 @@ end
         @test r.stopped_by === nothing
     end
 end
+
+@testset "prerequisite: its own opts do not drop the caller's deadline" begin
+    # `p.opts` replaced the dependent stage's `RunOpts` wholesale, and `deadline` defaults to
+    # `nothing`. So a prerequisite built only to raise `stale_after` — the documented reason to
+    # pass `opts` at all — ran with NO deadline and could outlive the allocation running it.
+    with_both() do main, prep, outdir
+        built = Ref(0)
+        work = k -> (built[] += 1; Dict{String,Any}("s" => 1))
+        keys = ParamIO.expand(prep.spec)
+
+        p = Prerequisite(work, prep, keys; opts=RunOpts(stale_after=3600.0))
+        r = run_prerequisite!(p; opts=RunOpts(deadline=time() - 1), poll=0.01)
+        @test r.complete == false
+        @test r.stopped_by === :deadline          # inherited from the caller
+        @test built[] == 0                        # and no setup was handed out
+        @test p.opts.stale_after == 3600.0        # while the field it WAS given still applies
+
+        # Control: one set on the prerequisite itself still takes precedence over the caller's.
+        p2 = Prerequisite(work, prep, keys; opts=RunOpts(deadline=time() + 3600))
+        r2 = run_prerequisite!(p2; opts=RunOpts(deadline=time() - 1), poll=0.01)
+        @test r2.complete == true
+        @test built[] == length(keys)
+    end
+end

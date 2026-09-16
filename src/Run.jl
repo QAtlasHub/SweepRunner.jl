@@ -206,7 +206,9 @@ left it takes from the group with the most work outstanding, which spreads worke
 Only affects the `pmap` path; the sequential path already visits keys in order.
 
 Returns `(; stage, done, err, busy, gave_up, stop, skipped, total, stopped_by)`. `stopped_by` is
-`:flag`, `:deadline`, or `nothing`, so a short stage is attributable without re-reading the clock.
+`:flag`, `:deadline`, or `nothing`, recorded when a key was actually held back rather than read
+off the clock at return, so a stage that finished everything reports `nothing` even if the deadline
+passed while its last key ran.
 The full-done early exit returns the same field set rather than a shorter one.
 
 Contract:
@@ -298,6 +300,7 @@ function run!(
     n_busy = 0
     n_gave_up = 0
     n_stop = 0
+    stop_seen = nothing
     for (key, outcome) in outcomes
         if outcome === :lock_busy
             n_busy += 1
@@ -306,8 +309,12 @@ function run!(
         elseif outcome === :ok
             add_complete!(m, key)
             n_done += 1
-        elseif outcome === :stop
+        elseif outcome === :stop_flag
             n_stop += 1
+            stop_seen = :flag                 # outranks :deadline, as `_stop_reason` does
+        elseif outcome === :stop_deadline
+            n_stop += 1
+            stop_seen === nothing && (stop_seen = :deadline)
         elseif outcome === :gave_up
             n_gave_up += 1
             n_err += 1
@@ -320,7 +327,9 @@ function run!(
     # concurrent masters don't overwrite each other's completed keys.
     merge_and_save_manifest!(m)
 
-    stopped_by = _stop_reason(opts)
+    # From what the round actually did, so a stage that finished every key is not attributed to a
+    # deadline that passed while the last one ran.
+    stopped_by = stop_seen
     log_event(
         log,
         :stage_done;
@@ -388,7 +397,8 @@ Outcome symbols:
 - `:ok`           — `work_fn` succeeded and `mark_done!` was called.
 - `:error`        — single-attempt failure (`opts.max_attempts == 1`).
 - `:gave_up`      — all `opts.max_attempts` attempts failed.
-- `:stop`         — stop flag detected before work started.
+- `:stop_flag` / `:stop_deadline`
+                  — a stop condition held before work started, carrying which one.
 """
 function _run_one_with_lock!(
     work_fn::Function,
@@ -402,8 +412,12 @@ function _run_one_with_lock!(
 
     # Early exit if stop flag has been raised (checked by both sequential
     # and pmap paths, so each worker can bail independently).
-    if _is_stopped(opts)
-        return (key, :stop)
+    # The REASON travels back with the outcome. Asking again after the round answers "is a stop
+    # condition true now", which is a different question: a flag file can be removed and a deadline
+    # can pass in between, so the answer names something that did not stop this.
+    stop = _stop_reason(opts)
+    if stop !== nothing
+        return (key, stop === :flag ? :stop_flag : :stop_deadline)
     end
 
     # A lock whose holder can be SHOWN to be gone does not have to wait out `stale_after`. The
@@ -504,8 +518,15 @@ function _run_sequential!(
     opts::RunOpts,
 )
     results = Vector{Tuple{DataKey,Symbol}}()
-    for key in todo
-        if _is_stopped(opts)
+    for (i, key) in enumerate(todo)
+        # The keys a stop drops are ATTRIBUTED, not silently absent. `pmap` hands every remaining
+        # key to `_run_one_with_lock!`, which returns a stop outcome for each, so leaving them out
+        # here made the same stop report a different `stop` count depending on the dispatcher — and
+        # made `stopped_by` unattributable on this path.
+        stop = _stop_reason(opts)
+        if stop !== nothing
+            sym = stop === :flag ? :stop_flag : :stop_deadline
+            append!(results, ((k, sym) for k in @view todo[i:end]))
             break
         end
         push!(results, _run_one_with_lock!(work_fn, vault, key, stage, log, opts))
@@ -848,10 +869,13 @@ function run_loop!(
     # separates "a sibling is working on it" from "the holder is gone". The margin covers the round
     # that has to follow the expiry to act on it.
     busy_budget = opts.stale_after + 2 * idle_sleep
+    stopped = nothing
     while true
-        if _is_stopped(opts)
-            break
-        end
+        # Captured at the exit rather than re-read at return. A loop that exhausts
+        # `max_empty_rounds` sleeps `idle_sleep` between rounds and can cross the deadline while
+        # doing so, and a flag file removed in the meantime turns a real flag stop into `nothing`.
+        stopped = _stop_reason(opts)
+        stopped === nothing || break
         rounds += 1
         result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
         n_done += result.done
@@ -873,6 +897,9 @@ function run_loop!(
         end
         empty_count += 1
         if empty_count >= max_empty_rounds
+            # The round itself may have been cut short rather than empty, and if so that is why
+            # there was nothing to do. Its own recorded reason, not a fresh clock read.
+            stopped = result.stopped_by
             break
         end
         sleep(idle_sleep)
@@ -882,7 +909,7 @@ function run_loop!(
         rounds=rounds,
         done=n_done,
         busy=n_busy,
-        stopped_by=_stop_reason(opts),
+        stopped_by=stopped,
         prerequisite=pre,
     )
 end

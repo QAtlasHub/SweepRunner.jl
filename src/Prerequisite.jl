@@ -13,6 +13,11 @@ is what it becomes: its own key space, its own vault, its own payloads.
 usually about `stale_after`: the shared setup is typically the slow half, and a lock reclaimed
 mid-build is the thing this exists to prevent.
 
+`stop_flag` and `deadline` are NOT overridden by omission. They say when the job must stop rather
+than how this stage runs, so leaving either unset here inherits the caller's; setting one takes
+precedence as any other field does. Without that, raising `stale_after` alone silently dropped the
+caller's deadline and let the barrier outlive the allocation running it.
+
 Build `keys` by projecting the dependent key space onto the axes the setup actually depends on
 (`ParamIO.project`), so the two spaces cannot drift apart by hand.
 """
@@ -54,7 +59,7 @@ point; a dead one is bounded by `stale_after`, after which its lock is reclaimab
 function run_prerequisite!(
     p::Prerequisite; opts::RunOpts=RunOpts(), load=nothing, poll::Real=30.0
 )
-    o = p.opts === nothing ? opts : p.opts
+    o = _merged_opts(p, opts)
     n_done = 0
     waited = 0
     rounds = 0
@@ -96,7 +101,9 @@ function run_prerequisite!(
                     done=n_done,
                     waited=waited,
                     rounds=rounds,
-                    stopped_by=nothing,
+                    # A round that handed out nothing may have been cut short rather than empty,
+                    # and those are different failures: one retries, the other will not.
+                    stopped_by=r.stopped_by,
                 )
             end
             waited += 1
@@ -106,5 +113,22 @@ function run_prerequisite!(
 end
 
 _n_undone(p::Prerequisite) = count(k -> !DataVault.is_done(p.vault, k), p.keys)
+
+# `p.opts` replaces the stage's knobs wholesale. `stop_flag` and `deadline` are not stage knobs:
+# they bound the JOB. An unset one therefore inherits the caller's rather than reverting to the
+# `RunOpts` default, which for `deadline` is `nothing` — no bound at all.
+function _merged_opts(p::Prerequisite, opts::RunOpts)::RunOpts
+    p.opts === nothing && return opts
+    o = p.opts
+    return RunOpts(;
+        workers=o.workers,
+        max_attempts=o.max_attempts,
+        stale_after=o.stale_after,
+        heartbeat_interval=o.heartbeat_interval,
+        stop_flag=o.stop_flag === nothing ? opts.stop_flag : o.stop_flag,
+        log_level=o.log_level,
+        deadline=o.deadline === nothing ? opts.deadline : o.deadline,
+    )
+end
 
 export Prerequisite, run_prerequisite!
