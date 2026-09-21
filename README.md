@@ -116,6 +116,35 @@ key is done, and if one cannot be built it does not start it at all. The depende
 deep and resolved inside `work_fn`, so this is "all of the setup, then all of the dependents", not
 a DAG.
 
+### Shared setup without a barrier — artifacts
+
+When the setup depends on a subset of the axes, declaring it in the config
+(`[artifacts.<name>] depends_on = [...]`, ParamIO ≥ 0.4.11) lets `work_fn` build it on demand
+and every other key reuse it, with no second vault and no barrier:
+
+```julia
+work_fn = k -> begin
+    gs = DataVault.artifact!(vault, :ground_state, k; wait=false) do akey   # a miss builds
+        prepare(param(akey, "system.L"))
+    end
+    Dict{String,Any}("x" => respond(gs, k))
+end
+run!(work_fn, vault, keys; affinity = artifact_affinity(vault, :ground_state))
+```
+
+- `artifact_affinity` keeps keys that share an artifact on one worker and starts distinct
+  artifacts on distinct workers.
+- With `wait=false`, a key whose artifact another worker or job is still building throws
+  `DataVault.ArtifactBusy`; `run!` logs `:artifact_busy`, **defers the key without spending an
+  attempt**, and re-dispatches it once the pass drains (`:deferred_round`; after a pass that
+  finished nothing it first waits `RunOpts(defer_poll=30.0)`). A key still deferred when the run
+  stops is counted with `busy`. With `wait=true` (the default) the worker simply blocks until the
+  artifact exists — the better choice when there are no more keys than workers.
+
+The artifact lives outside the run (`{outdir}/artifacts/...`), so the next job and the next run
+under the same `outdir` reuse it too. `Prerequisite` remains for setups that must be complete
+before anything else starts.
+
 ## Phase chaining without `Stage` / `DAG`
 
 A dependent stage loads its parent's output inside the work function using

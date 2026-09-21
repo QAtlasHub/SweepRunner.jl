@@ -69,6 +69,10 @@ Execution options for [`run!`](@ref).
   RunOpts(deadline = time() + 25 * 60)   # stop dispatching 5 min before a 30 min job ends
   ```
 
+- `defer_poll::Float64 = 30.0` — seconds [`run!`](@ref) waits before re-dispatching keys whose
+  `work_fn` threw `DataVault.ArtifactBusy` (an artifact being built by another worker or job),
+  when the previous pass made no progress. A deferred key costs no attempt.
+
 # Example
 
 ```julia
@@ -85,6 +89,7 @@ struct RunOpts
     stop_flag::Union{String,Nothing}
     log_level::Symbol
     deadline::Union{Float64,Nothing}
+    defer_poll::Float64
 end
 
 function RunOpts(;
@@ -95,6 +100,7 @@ function RunOpts(;
     stop_flag::Union{String,Nothing}=get(ENV, "SWEEPRUNNER_STOP_FLAG", nothing),
     log_level::Symbol=:info,
     deadline::Union{Real,Nothing}=nothing,
+    defer_poll::Real=30.0,
 )
     workers in (:auto, :sequential) || throw(
         ArgumentError(
@@ -121,6 +127,7 @@ function RunOpts(;
         stop_flag,
         log_level,
         deadline === nothing ? nothing : Float64(deadline),
+        Float64(defer_poll),
     )
 end
 
@@ -282,7 +289,8 @@ function run!(
 
     # Dispatch strategy: pmap when Distributed workers are present (unless the
     # caller forced `workers=:sequential`), otherwise the sequential loop.
-    outcomes = if opts.workers !== :sequential && nprocs() > 1
+    multi = opts.workers !== :sequential && nprocs() > 1
+    if multi
         # Ensure the seam packages (+ the user's work module(s) via `load=`) are loaded in `Main`
         # on every worker before fan-out. `init_workers!` spawns workers with `--project` but loads
         # no packages, so the first pmap task would otherwise die with a cryptic
@@ -291,14 +299,15 @@ function run!(
         _ensure_worker_modules(
             vcat([:ParamIO, :DataVault, :SweepRunner], _worker_module_names(load))
         )
-        if affinity === nothing
-            _run_pmap!(work_fn, vault, todo, stage, log, opts)
-        else
-            _run_affinity!(work_fn, vault, todo, stage, log, opts, affinity)
-        end
-    else
-        _run_sequential!(work_fn, vault, todo, stage, log, opts)
     end
+    dispatch = ks -> if !multi
+        _run_sequential!(work_fn, vault, ks, stage, log, opts)
+    elseif affinity === nothing
+        _run_pmap!(work_fn, vault, ks, stage, log, opts)
+    else
+        _run_affinity!(work_fn, vault, ks, stage, log, opts, affinity)
+    end
+    outcomes = _redispatch_deferred(dispatch(todo), dispatch, log, stage, opts)
 
     # Aggregate outcomes into counters + manifest updates.
     n_done = 0
@@ -308,7 +317,7 @@ function run!(
     n_stop = 0
     stop_seen = nothing
     for (key, outcome) in outcomes
-        if outcome === :lock_busy
+        if outcome === :lock_busy || outcome === :deferred
             n_busy += 1
         elseif outcome === :already_done
             add_complete!(m, key)
@@ -719,6 +728,38 @@ function _run_affinity!(
 end
 
 """
+    _redispatch_deferred(outcomes, dispatch, log, stage, opts) -> outcomes
+
+Re-run the keys whose `work_fn` threw `DataVault.ArtifactBusy` until none is left or the run is
+stopped. The first re-dispatch follows a pass that finished something, so the artifact it was
+waiting on has usually been built by then and it goes at once; after a pass that finished
+nothing, it waits `opts.defer_poll` seconds first — the builder is then another job. Returns the
+outcomes in the caller's key order. A key still deferred when the run stops is left as
+`:deferred`, which `run!` counts with `busy`: it was never attempted.
+"""
+function _redispatch_deferred(
+    outcomes, dispatch, log::EventLog, stage::Symbol, opts::RunOpts
+)
+    final = Dict{DataKey,Symbol}(k => o for (k, o) in outcomes)
+    progressed = any(o -> o === :ok || o === :already_done, last.(outcomes))
+    round = 0
+    while true
+        deferred = DataKey[k for (k, _) in outcomes if final[k] === :deferred]
+        isempty(deferred) && break
+        _stop_reason(opts) === nothing || break
+        progressed || sleep(opts.defer_poll)
+        round += 1
+        log_event(log, :deferred_round; stage=stage, round=round, keys=length(deferred))
+        res = dispatch(deferred)
+        progressed = any(r -> last(r) === :ok || last(r) === :already_done, res)
+        for (k, o) in res
+            final[k] = o
+        end
+    end
+    return [(k, final[k]) for (k, _) in outcomes]
+end
+
+"""
     _run_one_with_retry!(work_fn, vault, key, kstr, stage, log, opts, lost) -> Symbol
 
 Execute `work_fn(key)` up to `opts.max_attempts` times. Returns:
@@ -761,6 +802,12 @@ function _run_one_with_retry!(
             )
             return :ok
         catch e
+            # Not a failure: the artifact this key needs is being built elsewhere. Hand the key
+            # back without spending an attempt; `run!` re-dispatches it once the pass drains.
+            if e isa DataVault.ArtifactBusy
+                log_event(log, :artifact_busy; stage=stage, key=kstr, artifact=e.name)
+                return :deferred
+            end
             last_err = _short_err(e)
             log_event(log, :error; stage=stage, key=kstr, attempt=attempt, err=last_err)
             if attempt < opts.max_attempts
