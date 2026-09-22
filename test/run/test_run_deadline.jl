@@ -120,3 +120,57 @@ end
         end
     end
 end
+
+@testset "deadline: an exhausted loop is not attributed to a deadline that passed meanwhile" begin
+    # `stopped_by` was re-read from the clock when `run_loop!` returned, not recorded when
+    # something was actually held back. A round that ran past the deadline and then gave up on
+    # `max_empty_rounds` therefore reported `:deadline`, a retryable answer, for a key that
+    # cannot be produced and will fail again on the next allocation.
+    with_vault_d() do v, outdir
+        keys = ParamIO.expand(v.spec)[1:1]        # one key, so the stop never holds one back
+        # Margins an order of magnitude wider than the work they bound: CI here is self-hosted and
+        # shares the box, and the only failure mode is a false RED on good code.
+        deadline = time() + 2.0
+        work = k -> (sleep(3.0); error("this key cannot be produced"))
+        r = run_loop!(
+            work,
+            v,
+            keys;
+            opts=RunOpts(deadline=deadline, max_attempts=1, workers=:sequential),
+            max_empty_rounds=1,
+            idle_sleep=0.01,
+        )
+        @test r.done == 0
+        @test time() > deadline                   # the deadline HAS passed by the time it returns
+        @test r.stopped_by === nothing            # but nothing was ever held back by it
+
+        # Control: when the deadline really does hold keys back, it is still reported.
+        r2 = run_loop!(
+            k -> Dict{String,Any}("x" => 1),
+            v,
+            ParamIO.expand(v.spec);
+            opts=RunOpts(deadline=time() - 1),
+            max_empty_rounds=1,
+            idle_sleep=0.01,
+        )
+        @test r2.done == 0
+        @test r2.stopped_by === :deadline
+    end
+end
+
+@testset "deadline: both dispatchers attribute the keys a stop dropped" begin
+    # The sequential path used to `break` and emit no outcome for the remaining keys, while `pmap`
+    # handed every one of them back as stopped. The same stop reported a different `stop` count
+    # depending on which dispatcher ran, and on this path left `stopped_by` unattributable.
+    with_vault_d() do v, outdir
+        keys = ParamIO.expand(v.spec)
+        @test length(keys) > 1
+        deadline = time() + 2.0
+        work = k -> (sleep(3.0); Dict{String,Any}("x" => 1))
+        r = run!(work, v, keys; opts=RunOpts(workers=:sequential, deadline=deadline))
+        @test r.done == 1                         # the first key ran to completion
+        @test r.stop == length(keys) - 1          # every later key is accounted for, not absent
+        @test r.done + r.stop + r.err + r.busy == length(keys)
+        @test r.stopped_by === :deadline
+    end
+end

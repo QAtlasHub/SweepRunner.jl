@@ -49,6 +49,13 @@ SweepRunner.run!
 SweepRunner.run_loop!
 ```
 
+## Liveness
+
+```@docs
+SweepRunner.owner_token
+SweepRunner.holder_liveness
+```
+
 ## Prerequisite
 
 ```@docs

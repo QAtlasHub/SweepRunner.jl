@@ -13,6 +13,14 @@ is what it becomes: its own key space, its own vault, its own payloads.
 usually about `stale_after`: the shared setup is typically the slow half, and a lock reclaimed
 mid-build is the thing this exists to prevent.
 
+`stop_flag` and `deadline` are not stage knobs: they bound the JOB, and a stage may not loosen a
+bound the job set. `deadline` therefore takes the TIGHTER of the two, and `stop_flag` takes the
+caller's whenever it has one. A prerequisite cannot redirect or outlive either.
+
+That asymmetry is deliberate for `stop_flag`: [`RunOpts`](@ref) resolves its default from
+`ENV["SWEEPRUNNER_STOP_FLAG"]`, so an `opts` here that never mentions `stop_flag` can still carry
+one, and `=== nothing` does not mean "the author left it unset" for that field.
+
 Build `keys` by projecting the dependent key space onto the axes the setup actually depends on
 (`ParamIO.project`), so the two spaces cannot drift apart by hand.
 """
@@ -54,7 +62,7 @@ point; a dead one is bounded by `stale_after`, after which its lock is reclaimab
 function run_prerequisite!(
     p::Prerequisite; opts::RunOpts=RunOpts(), load=nothing, poll::Real=30.0
 )
-    o = p.opts === nothing ? opts : p.opts
+    o = _merged_opts(p, opts)
     n_done = 0
     waited = 0
     rounds = 0
@@ -62,9 +70,12 @@ function run_prerequisite!(
     while true
         stopped = _stop_reason(o)
         if stopped !== nothing
+            # A barrier whose keys are all done is satisfied whether or not a stop is pending;
+            # `complete=false` beside `remaining=0` would gate the dependent stage on nothing.
+            undone = _n_undone(p)
             return (;
-                complete=false,
-                remaining=_n_undone(p),
+                complete=undone == 0,
+                remaining=undone,
                 done=n_done,
                 waited=waited,
                 rounds=rounds,
@@ -96,7 +107,9 @@ function run_prerequisite!(
                     done=n_done,
                     waited=waited,
                     rounds=rounds,
-                    stopped_by=nothing,
+                    # A round that handed out nothing may have been cut short rather than empty,
+                    # and those are different failures: one retries, the other will not.
+                    stopped_by=r.stopped_by,
                 )
             end
             waited += 1
@@ -106,5 +119,26 @@ function run_prerequisite!(
 end
 
 _n_undone(p::Prerequisite) = count(k -> !DataVault.is_done(p.vault, k), p.keys)
+
+# `nothing` is "no bound", so it loses to any real one.
+function _tighter(a::Union{Float64,Nothing}, b::Union{Float64,Nothing})
+    return a === nothing ? b : (b === nothing ? a : min(a, b))
+end
+
+# `p.opts` replaces the stage's knobs wholesale, but not the two that bound the job. Taking the
+# tighter deadline rather than the explicit one matters in both directions: reverting it to
+# `nothing` lets the barrier outlive the allocation, and so does honouring a more generous ceiling
+# the Prerequisite was built with months earlier.
+function _merged_opts(p::Prerequisite, opts::RunOpts)::RunOpts
+    p.opts === nothing && return opts
+    o = p.opts
+    job = (
+        stop_flag=opts.stop_flag === nothing ? o.stop_flag : opts.stop_flag,
+        deadline=_tighter(o.deadline, opts.deadline),
+    )
+    # Everything else forwarded BY NAME, so a field added to `RunOpts` later cannot be silently
+    # reset to its constructor default here.
+    return RunOpts(; (f => get(job, f, getfield(o, f)) for f in fieldnames(RunOpts))...)
+end
 
 export Prerequisite, run_prerequisite!
