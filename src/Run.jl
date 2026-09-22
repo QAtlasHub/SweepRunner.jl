@@ -795,10 +795,18 @@ function _run_one_with_retry!(
                 log_event(log, :lock_lost; stage=stage, key=kstr, attempt=attempt)
                 return :lock_busy
             end
-            DataVault.save!(vault, key, payload)
-            DataVault.mark_done!(vault, key)
+            # The digest save! took before its rename goes into the marker, so `.done` names the
+            # bytes this attempt wrote rather than whatever the file holds when someone looks.
+            saved = DataVault.save!(vault, key, payload)
+            DataVault.mark_done!(vault, key; result=saved)
             log_event(
-                log, :key_done; stage=stage, key=kstr, secs=time() - t0, attempt=attempt
+                log,
+                :key_done;
+                stage=stage,
+                key=kstr,
+                secs=time() - t0,
+                attempt=attempt,
+                sha256=saved.sha256,
             )
             return :ok
         catch e
