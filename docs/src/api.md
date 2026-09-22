@@ -49,6 +49,12 @@ SweepRunner.run!
 SweepRunner.run_loop!
 ```
 
+## Artifacts
+
+```@docs
+SweepRunner.artifact_affinity
+```
+
 ## Liveness
 
 ```@docs
