@@ -15,18 +15,21 @@ const _OBSERVATIONS_LOCK = ReentrantLock()
 _observation_key(vault::Vault) = (vault.outdir, vault.spec.study.project_name, vault.run)
 
 """
-    _observe_here!(vault, role) -> (token, err)
+    _observe_here!(vault, role, work_fn = nothing) -> (token, err)
 
-Observe the sources from this process and remember the token for `vault`. On failure the token is
+Observe the sources from this process and remember the token for `vault`. `work_fn` is named as
+the entry code (`observe_sources(...; code=[work_fn])`): the binding vouches for it or says why
+not — a closure or a function defined in the driving script cannot be checked. On failure the token is
 `nothing` and any earlier token for `vault` is forgotten, so a marker written afterwards says
 `observation=unknown` rather than naming an observation of some earlier state.
 """
-function _observe_here!(vault::Vault, role::AbstractString)
+function _observe_here!(vault::Vault, role::AbstractString, work_fn=nothing)
     token, err = try
         DataVault.observe_sources(
             vault;
             phase="run-start",
             process=Dict("role" => String(role), "myid" => myid()),
+            code=work_fn === nothing ? () : (work_fn,),
         ),
         nothing
     catch e
@@ -57,7 +60,9 @@ end
 
 # Observe on the master, and on every worker when the run fans out. Each outcome is an event: an
 # observation that failed leaves its process's markers at `observation=unknown`, and says why.
-function _observe_processes!(vault::Vault, multi::Bool, observe::Bool, log, stage)
+function _observe_processes!(
+    vault::Vault, multi::Bool, observe::Bool, log, stage; work_fn=nothing
+)
     targets = if multi
         vcat([(myid(), "master")], [(w, "worker") for w in workers()])
     else
@@ -75,9 +80,18 @@ function _observe_processes!(vault::Vault, multi::Bool, observe::Bool, log, stag
     end
     outcomes = asyncmap(targets) do (pid, role)
         return if pid == myid()
-            _observe_here!(vault, role)
+            _observe_here!(vault, role, work_fn)
         else
-            remotecall_fetch(SweepRunner._observe_here!, pid, vault, role)
+            # `work_fn` travels to the worker, as it will for pmap: a named function resolves to
+            # the worker's own, a closure arrives as the master's code. One the worker cannot
+            # receive is a failed observation, not a failed run!.
+            try
+                remotecall_fetch(SweepRunner._observe_here!, pid, vault, role, work_fn)
+            catch e
+                e isa InterruptException && rethrow()
+                remotecall_fetch(SweepRunner._forget_observation!, pid, vault)
+                nothing, sprint(showerror, e)
+            end
         end
     end
     for ((pid, role), (token, err)) in zip(targets, outcomes)
