@@ -55,6 +55,9 @@ stay within that guarantee.
 |                 | the re-dispatch bound (includes `deaths`)                          |
 | `worker_lost`   | every worker died with keys still queued; this key was left for a  |
 |                 | later run rather than completed or failed                          |
+| `artifact_busy` | `work_fn` threw `DataVault.ArtifactBusy`; the key is deferred, no  |
+|                 | attempt spent (includes `artifact`)                                |
+| `deferred_round`| `run!` re-dispatches its deferred keys (includes `round`, `keys`) |
 
 `:key_start` and `:lock_busy` are emitted at `:debug` level and are suppressed
 unless the `EventLog` is created with `min_level=:debug` (see `RunOpts.log_level`);

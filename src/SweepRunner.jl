@@ -70,6 +70,7 @@ include("Manifest.jl")
 include("InitWorkers.jl")
 include("Liveness.jl")
 include("Run.jl")
+include("Artifacts.jl")        # artifact_affinity; ArtifactBusy deferral lives in Run.jl
 include("Prerequisite.jl")
 include("Preflight.jl")
 

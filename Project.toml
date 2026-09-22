@@ -1,6 +1,6 @@
 name = "SweepRunner"
 uuid = "be946ad2-3cb3-4b6e-8f7e-4a5ecc3c255b"
-version = "0.6.3"
+version = "0.6.4"
 authors = ["sota shimozono <shimozono-sota631@g.ecc.u-tokyo.ac.jp>"]
 
 [deps]
@@ -19,17 +19,18 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 Aqua = "0.8"
-# 0.8.1 is the floor, not a preference: the owner-stamped `.running` API
+# 0.8.2 is the floor, not a preference: `artifact!` / `ArtifactBusy` (what the deferral and
+# `artifact_affinity` are built for) arrived there. The owner-stamped `.running` API
 # (`new_owner_token`, `running_owner`, and the three-argument `refresh_running!` /
-# `clear_running!`) arrived there, and the liveness reaper is built on it.
-DataVault = "0.8.1"
+# `clear_running!`) that the liveness reaper is built on arrived in 0.8.1.
+DataVault = "0.8.2"
 Dates = "1.11"
 Distributed = "1.11"
 JLD2 = "0.6"
 JSON3 = "1"
 LinearAlgebra = "1.11"
 Logging = "1.11"
-ParamIO = "0.3, 0.4"
+ParamIO = "0.4.11"
 Printf = "1.11"
 SHA = "0.7"
 Serialization = "1.11"
