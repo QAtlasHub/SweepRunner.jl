@@ -29,13 +29,16 @@ end
         res = run!(_obsrun_work, v, keys; opts=RunOpts(; workers=:sequential))
         @test res.done == length(keys)
         tokens = unique(_obsrun_done(v, k)["observation"] for k in keys)
-        @test length(tokens) == 1 && startswith(only(tokens), "obs1-")
+        @test length(tokens) == 1 && startswith(only(tokens), "obs2-")
         r = _obsrun_record(v, only(tokens))
         @test r["phase"] == "run-start"
         @test r["process"]["role"] == "master" && r["process"]["pid"] == getpid()
         @test isfile(joinpath(_obsrun_dir(v), "sources", r["source"], "COMPLETE"))
-        @test r["binding"] in
-            ("loaded-matches-disk", "loaded-differs-from-disk", "unverified")
+        # The work function is the entry code; defined in this test, not a package, it cannot be
+        # vouched for, and the observation says so rather than claiming a match.
+        @test only(r["code"])["name"] == "_obsrun_work"
+        @test r["binding"] == "unverified"
+        @test any(contains("_obsrun_work"), r["binding_reasons"])
     end
 end
 
@@ -77,6 +80,12 @@ end
             ]
             @test all(r -> r["process"]["role"] == "worker", recs)
             @test all(r -> r["process"]["myid"] in pids, recs)
+            # A closure is the master's code on the worker: never a match.
+            @test all(r -> r["binding"] == "unverified", recs)
+            @test all(
+                r -> any(contains("arrived from another process"), r["binding_reasons"]),
+                recs,
+            )
             roles = [
                 TOML.parsefile(joinpath(_obsrun_dir(v), "observations", f))["process"]["role"]
                 for f in readdir(joinpath(_obsrun_dir(v), "observations"))

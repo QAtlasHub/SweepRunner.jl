@@ -210,7 +210,9 @@ With `observe=true` (the default) the master and every worker call `DataVault.ob
 before any key is dispatched, and each `.done` a process writes carries that process's token
 (`observation=<token>`). The observation records what the source looked like at `run!` start and
 its **binding** — how far the code that process had loaded was checked against it — so a marker
-never claims more than was checked. An observation that fails does not stop the run: the event log
+never claims more than was checked. `work_fn` is named as the entry code: the binding can be
+`loaded-matches-disk` only when it is a function of a package loaded from the study's sources, not
+a closure or a function defined in the driving script (those are `unverified`, with the reason). An observation that fails does not stop the run: the event log
 says why, and that process's markers read `observation=unknown`, as they do with `observe=false`.
 
 # Affinity
@@ -312,7 +314,7 @@ function run!(
     end
     # Every process that will write markers observes its sources now, so each `.done` names the
     # observation of the process that computed it (see Observe.jl).
-    _observe_processes!(vault, multi, observe, log, stage)
+    _observe_processes!(vault, multi, observe, log, stage; work_fn)
     dispatch = ks -> if !multi
         _run_sequential!(work_fn, vault, ks, stage, log, opts)
     elseif affinity === nothing
