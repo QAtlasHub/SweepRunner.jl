@@ -185,7 +185,7 @@ derives `(root, stage)` from a `DataVault.Vault`:
 load_manifest(vault::Vault) = load_manifest(manifest_root(vault), Symbol(vault.run))
 
 """
-    run!(work_fn, vault, keys; opts=RunOpts(), load=nothing) -> NamedTuple
+    run!(work_fn, vault, keys; opts=RunOpts(), load=nothing, observe=true) -> NamedTuple
 
 Run `work_fn(key) -> Dict` for every `key` in `keys`, persisting through
 `vault`. Writes a structured JSONL event log at
@@ -203,6 +203,15 @@ these in `Main` on every worker before fan-out, so a compute script no longer ha
 Early skip (todo 10): on startup a stage-level Manifest is loaded. Keys
 already in the manifest are skipped — when all keys are done, the second
 run-through takes O(1) filesystem operations regardless of `length(keys)`.
+
+# Source observations
+
+With `observe=true` (the default) the master and every worker call `DataVault.observe_sources`
+before any key is dispatched, and each `.done` a process writes carries that process's token
+(`observation=<token>`). The observation records what the source looked like at `run!` start and
+its **binding** — how far the code that process had loaded was checked against it — so a marker
+never claims more than was checked. An observation that fails does not stop the run: the event log
+says why, and that process's markers read `observation=unknown`, as they do with `observe=false`.
 
 # Affinity
 
@@ -261,6 +270,7 @@ function run!(
     opts::RunOpts=RunOpts(),
     load=nothing,
     affinity=nothing,
+    observe::Bool=true,
 )
     stage = Symbol(vault.run)
     log_name = "events_$(gethostname())_$(getpid()).jsonl"
@@ -300,6 +310,9 @@ function run!(
             vcat([:ParamIO, :DataVault, :SweepRunner], _worker_module_names(load))
         )
     end
+    # Every process that will write markers observes its sources now, so each `.done` names the
+    # observation of the process that computed it (see Observe.jl).
+    _observe_processes!(vault, multi, observe, log, stage)
     dispatch = ks -> if !multi
         _run_sequential!(work_fn, vault, ks, stage, log, opts)
     elseif affinity === nothing
@@ -798,7 +811,9 @@ function _run_one_with_retry!(
             # The digest save! took before its rename goes into the marker, so `.done` names the
             # bytes this attempt wrote rather than whatever the file holds when someone looks.
             saved = DataVault.save!(vault, key, payload)
-            DataVault.mark_done!(vault, key; result=saved)
+            DataVault.mark_done!(
+                vault, key; result=saved, observation=_observation_token(vault)
+            )
             log_event(
                 log,
                 :key_done;
@@ -903,6 +918,7 @@ function run_loop!(
     load=nothing,
     prerequisite=nothing,
     affinity=nothing,
+    observe::Bool=true,
 )
     pre = nothing
     if prerequisite !== nothing
@@ -934,7 +950,9 @@ function run_loop!(
         stopped = _stop_reason(opts)
         stopped === nothing || break
         rounds += 1
-        result = run!(work_fn, vault, keys; opts=opts, load=load, affinity=affinity)
+        result = run!(
+            work_fn, vault, keys; opts=opts, load=load, affinity=affinity, observe=observe
+        )
         n_done += result.done
         n_busy = result.busy
         if result.done > 0
