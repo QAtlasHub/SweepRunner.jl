@@ -38,19 +38,30 @@ allk_a(v) = ParamIO.expand(v.spec)
         @test length(keys) >= 4
 
         stop = joinpath(outdir, "STOP_NOW")
-        # Delay the stop flag by 50 ms so a few keys finish first
-        t = Timer(_ -> touch(stop), 0.05)
+        # The concurrent task raises the flag once the first key has finished — not after a fixed
+        # delay, which assumed `run!` starts within it. It does not always: a run-start
+        # observation that keeps the packages the process loaded takes most of a second, and a
+        # 50 ms timer then fired before any key ran.
+        first_done = Channel{Nothing}(1)
+        raiser = @async try
+            take!(first_done)
+            touch(stop)
+        catch e
+            e isa InvalidStateException || rethrow()      # closed: the run ended first
+        end
 
-        # work_fn sleeps so we're sure the stop is seen after some work
+        # work_fn sleeps so the raiser gets to run while keys remain
         counter = Ref(0)
         work_fn = k -> begin
             counter[] += 1
             sleep(0.02)
+            counter[] == 1 && put!(first_done, nothing)
             Dict{String,Any}("x" => 1)
         end
 
         result = run!(work_fn, v, keys; opts=RunOpts(stop_flag=stop))
-        close(t)
+        close(first_done)
+        wait(raiser)
 
         # At least one key ran before stop kicked in, at least one was skipped
         @test result.done >= 1
