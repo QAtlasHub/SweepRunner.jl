@@ -37,15 +37,35 @@ stay within that guarantee.
 | kind            | when                                                              |
 | :-------------- | :---------------------------------------------------------------- |
 | `stage_start`   | once at the top of `run!` when `todo` is non-empty                |
-| `stage_done`    | once at the bottom of `run!` when `todo` was non-empty            |
+| `stage_done`    | once at the bottom of `run!` when `todo` was non-empty: the        |
+|                 | round's totals, incl. `held_back` and `collisions` (keys handed    |
+|                 | out that another master had taken), and where its wall time went:  |
+|                 | `prepare_secs`, `scan_secs`, `dispatch_secs`, `manifest_secs`,     |
+|                 | `total_secs`                                                       |
 | `key_acquired`  | the per-key lock was taken (includes `acq`); the only durable       |
 |                 | record of a claim, since a SIGKILL skips every later event         |
 | `key_start`     | before each `work_fn(key)` attempt (includes `attempt` field)     |
-| `key_done`      | after a successful `work_fn(key)` (includes `secs`, `attempt`)    |
-| `lock_busy`     | another master holds the `.running` lock (acquire = `:busy`)      |
+| `key_done`      | after a successful `work_fn(key)`: `secs` (wall), `cpu` (CPU       |
+|                 | seconds), `cores`, `rss` (peak bytes), `host`, `class`, `attempt`, |
+|                 | `sha256`, and `note` (what `work_fn` added with `note_key!`)       |
+| `key_spent`     | an attempt that did not finish its key, and what it cost:          |
+|                 | `outcome` (`error`, `stopped`, `lock_lost`, `worker_died`), `secs`,|
+|                 | `cpu`, `cores`, `rss`, `rss_scope`, `host`, `class`                |
+| `cost_source`   | `run!` took its cost from the measured table (`classes`,           |
+|                 | `measured_keys`, `fallback_keys`, `fallback`)                      |
+| `cost_table_unreadable` | the stage's cost table could not be read; the caller's     |
+|                 | hook is used                                                       |
+| `lock_busy`     | another master holds the `.running` lock: found by the master's    |
+|                 | scan before dispatch, or by a worker's acquire (= `:busy`)         |
 | `lock_lost`     | our lock was reclaimed mid-work; result discarded (no double-run) |
 | `lock_reaped`   | a lock whose holder was shown dead was cleared without waiting     |
+|                 | (includes `owner`, and `why`: the evidence)                        |
+| `locks_reconciled` | the master's pass over the locks before it built its queue, when |
+|                 | there was any (includes `locks`, `held`, `held_jobs`, `reaped`,    |
+|                 | `dead_jobs`, `stale`, `unknown`)                                   |
 | `reap_failed`   | reaping threw; the key falls back to the `stale_after` timeout     |
+| `lock_released` | the master took back a lock it had named (includes `why`:          |
+|                 | `worker_exited`, or `master_exit` for a key cut when it left)      |
 | `lock_reclaimed`| (reserved, not currently emitted)                                 |
 | `error`         | `work_fn` threw on this attempt                                   |
 | `retry`         | another attempt will follow                                       |
@@ -55,6 +75,62 @@ stay within that guarantee.
 |                 | the re-dispatch bound (includes `deaths`)                          |
 | `worker_lost`   | every worker died with keys still queued; this key was left for a  |
 |                 | later run rather than completed or failed                          |
+| `campaign_start`| [`run_campaign!`](@ref) began: the meta file, its `sha256`, the    |
+|                 | `profile`, the `stages` in order (in `events_campaign_*.jsonl`)    |
+| `campaign_stage`| one stage of a campaign: `ran` or the `reason` it did not, its     |
+|                 | key count and its `run_loop!` totals                               |
+| `campaign_reloaded` / `campaign_reload_refused` | the meta file changed under a        |
+|                 | running campaign and was taken up, or was broken and ignored       |
+| `campaign_done` | the campaign returned (`stages`, `ran`, `stopped_by`)              |
+| `pool_spawn`    | a [`SizedPool`](@ref) started workers of one size on a node        |
+|                 | (`node`, `cores`, `mem_gb`, `n`); `pool_spawn_failed` when it      |
+|                 | could not (`err`)                                                  |
+| `pool_limit`    | the most workers the pool will hold and where that number came     |
+|                 | from (`max_workers`, `source`); once per pool                      |
+| `pool_at_limit` | a start was wanted past that limit (`held`, `queued`); once        |
+| `pool_spawn_short` | a start brought fewer workers than asked (`asked`, `started`)   |
+| `pool_stalled`  | starts have neither joined nor failed for `stall_after`            |
+| `pool_gave_up`  | ten starts failed in a row with keys still queued; `run!` throws   |
+| `pool_retire`   | an idle worker whose size no queued key fits gave its room back    |
+| `pool_retry_mem`| a worker died under a key: the key is retried with more memory     |
+|                 | (`had_gb`, `next_gb`)                                              |
+| `key_too_big`   | a key needs more than any node offers, and is reported, not        |
+|                 | retried (`cores`, `mem_gb`, `node_cores`, `node_mem_gb`)           |
+| `held_back`     | keys this job did not start because they could not get anywhere    |
+|                 | before its deadline (`keys`, `secs_left`); once per round          |
+| `job_account`   | when a master ends: where its core-seconds went (`account`:        |
+|                 | `allocated`, `computing`, `kept`, `lost`, `keys_cut`, `startup`,   |
+|                 | `never_started`, `idle` by reason, `other`)                        |
+| `job_decision`  | what job management concluded for a partition: `action` (`submit`, |
+|                 | `hold`, `refuse`), `reason`, `node_hours`, `dry_run` (in           |
+|                 | `events_jobs_*.jsonl`)                                             |
+| `job_submitted` | a job was submitted (`id`, `partition`, `nodes`, `node_hours`)     |
+| `underused`     | the queue was empty and too few workers had a unit for             |
+|                 | `idle_grace`: the master stopped on purpose (`busy`, `workers`)    |
+| `control_request` | a [`control!`](@ref) request was applied (includes `id`, `op`,   |
+|                 | `by`: who asked, `asked_at`, and `detail`: what it changed)        |
+| `control_not_applied` | a request this master could not carry out (`detail` has      |
+|                 | `error` or `unsupported`); `:warn`                                 |
+| `control_bad_request` | a request file that could not be read after three tries      |
+| `control_ack_failed` | the acknowledgement of a request could not be written         |
+| `release_failed`| a lock this master meant to release is still there (`err`)         |
+| `checkpoint_unreadable` | a key's checkpoint could not be read: kept aside (`kept`), |
+|                 | the key starts over                                                |
+| `progress_unreadable` | progress stamps that could not be read (`files`)             |
+| `status_write_failed` | the status file could not be written; once per run of        |
+|                 | failures                                                           |
+| `cost_table_failed` | the per-class cost table could not be written                  |
+| `key_stopped`   | a unit told to stop left at a safe point ([`stop_point`](@ref));   |
+|                 | no attempt spent                                                   |
+| `key_cut`       | a unit told to stop was still running after its grace: its worker  |
+|                 | was removed, then its lock released (`worker_removed`,             |
+|                 | `lock_released`, `request`; `:warn`)                               |
+| `worker_retired`| a `:resize` took a worker out of the pool, between units           |
+| `workers_joined`| workers that joined after the round began were adopted (`n`)       |
+| `workers_rejected` | workers that joined late could not be readied and get no work   |
+| `workers_short` | fewer workers joined than `note_workers!` said were planned, for   |
+|                 | longer than the worker timeout (includes `planned`, `launched`,    |
+|                 | `joined`); logged once per distinct shortfall, at `:warn`          |
 | `artifact_busy` | `work_fn` threw `DataVault.ArtifactBusy`; the key is deferred, no  |
 |                 | attempt spent (includes `artifact`)                                |
 | `deferred_round`| `run!` re-dispatches its deferred keys (includes `round`, `keys`) |
